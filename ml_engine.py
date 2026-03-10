@@ -248,7 +248,7 @@ def save_predictions(lottery_type, predictions):
         payload = {
             "lottery_type": lottery_type,
             "predicted_numbers": pred["numbers"],
-            "confidence_score": 0.5,  # Score base, sera ajustado com autopsia semantica
+            "confidence": 0.5,  # Score base, sera ajustado com autopsia semantica
             "metadata": {
                 "game_number": pred["game_number"],
                 "sum": pred["sum"],
