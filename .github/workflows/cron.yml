@@ -1,30 +1,15 @@
-name: SIAOL-PRO v6.0 Autonomous Cycle
+# WORKFLOW DESATIVADO
+# Este arquivo foi substituído por siaol_ml_cron.yml (SIAOL-PRO v7)
+# Mantido vazio para não gerar execuções fantasmas
+
+name: "[DESATIVADO] SIAOL-PRO v6.0 Autonomous Cycle"
 
 on:
-  schedule:
-    - cron: '*/30 * * * *'
-  workflow_dispatch:
+  workflow_dispatch: # Apenas manual, sem cron
 
 jobs:
-  process:
+  disabled:
+    if: false
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests
-
-      - name: Run SIAOL-PRO Core
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python main.py
+      - run: echo "Workflow desativado. Use siaol_ml_cron.yml."
