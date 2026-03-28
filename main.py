@@ -395,11 +395,28 @@ def main():
     except Exception as e:
         print(f"  Backtesting indisponivel: {e}")
 
+    # FASE 7: Auto-Evolucao (SIAOL-PRO v9.0)
+    print(f"\n{'='*60}")
+    print(f"  FASE 7: Auto-Evolucao (The Organism)")
+    print(f"{'='*60}")
+    try:
+        from auto_evolve import run_evolution_cycle
+        # Evoluir a lotofacil (principal foco de precisao)
+        if "lotofacil" in lotteries:
+            evo_res = run_evolution_cycle("lotofacil")
+            if evo_res and evo_res["improvement"] > 0:
+                print(f"  [EVO] Sucesso! Melhoria de +{evo_res['improvement']:.3f} encontrada.")
+            else:
+                print("  [EVO] Nenhuma melhoria aceita nesta geracao.")
+    except Exception as e:
+        print(f"  [EVO] Erro no ciclo evolutivo: {e}")
+
     log_to_supabase(
-        f"SIAOL-PRO v7 ciclo completo. "
+        f"SIAOL-PRO v9.0 ciclo completo. "
         f"Total predicoes: {total_predictions}. "
         f"IAs usadas: {list(ai_results.keys()) if ai_results else 'Nenhuma'}."
     )
+
 
 
 if __name__ == "__main__":

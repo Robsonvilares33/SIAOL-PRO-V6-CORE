@@ -1,30 +1,34 @@
-name: SIAOL-PRO v8.5-TURBO Cloud Multi-Brain ML Engine
+name: SIAOL-PRO v9.0-ORGANISM Cloud Auto-Evolution
 
 on:
   schedule:
-    # 15:00 UTC = 12:00 BRT (Meio-dia de Brasilia)
     - cron: '0 15 * * *'
-  workflow_dispatch: # Botao de Run Manual no Github Actions
+  workflow_dispatch:
+
+permissions:
+  contents: write # Permissao para commitar o genome.json evoluido
 
 jobs:
-  run-ml-engine:
+  run-evolution:
     runs-on: ubuntu-latest
     
     steps:
     - name: Checkout do Repositorio
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
       
     - name: Setup Python 3.10
       uses: actions/setup-python@v5
       with:
         python-version: '3.10'
         
-    - name: Instalar Dependencias (Motor + IAs)
+    - name: Instalar Dependencias
       run: |
         python -m pip install --upgrade pip
         pip install requests python-dotenv groq google-generativeai
         
-    - name: Acionar Motor Multi-Cerebro SIAOL-PRO v8.5-TURBO
+    - name: Executar Motor e Auto-Evolucao
       env:
         SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
         SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
@@ -33,4 +37,17 @@ jobs:
         OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       run: |
         python main.py
+        
+    - name: Commitar Evolucao do Genoma
+      run: |
+        git config --local user.email "bot@siaol.pro"
+        git config --local user.name "SIAOL Organism Bot"
+        git add genome.json
+         if git diff --staged --quiet; then
+          echo "Nenhuma evolucao no genoma para commitar."
+        else
+          git commit -m "🧬 SIAOL-PRO v9: Evolucao automatica do genoma [$(date +'%Y-%m-%d %H:%M')]"
+          git push origin main
+        fi
+
 
