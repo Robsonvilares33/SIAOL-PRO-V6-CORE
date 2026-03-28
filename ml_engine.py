@@ -51,25 +51,40 @@ def log_to_supabase(message, level="INFO"):
 
 
 def fetch_historical_data(lottery_type, limit=200):
-    """Busca dados historicos do Supabase (aumentado para 200 para melhor ML)."""
+    """Busca dados historicos do Supabase COM PAGINACAO para superar o limite de 1000 linhas."""
     if not SUPABASE_URL or not SUPABASE_KEY:
         return []
-    url = (f"{SUPABASE_URL}/rest/v1/lottery_data"
-           f"?lottery_type=eq.{lottery_type}"
-           f"&order=draw_number.desc"
-           f"&limit={limit}"
-           f"&select=draw_number,draw_date,numbers")
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}"
     }
-    try:
-        resp = requests.get(url, headers=headers, timeout=15)
-        if resp.status_code == 200:
-            return resp.json()
-    except Exception as e:
-        print(f"Erro ao buscar dados: {e}")
-    return []
+    all_data = []
+    page_size = 1000
+    offset = 0
+    while len(all_data) < limit:
+        batch_limit = min(page_size, limit - len(all_data))
+        url = (f"{SUPABASE_URL}/rest/v1/lottery_data"
+               f"?lottery_type=eq.{lottery_type}"
+               f"&order=draw_number.desc"
+               f"&limit={batch_limit}"
+               f"&offset={offset}"
+               f"&select=draw_number,draw_date,numbers")
+        try:
+            resp = requests.get(url, headers=headers, timeout=30)
+            if resp.status_code == 200:
+                batch = resp.json()
+                if not batch:
+                    break
+                all_data.extend(batch)
+                if len(batch) < batch_limit:
+                    break
+                offset += len(batch)
+            else:
+                break
+        except Exception as e:
+            print(f"Erro ao buscar dados (offset {offset}): {e}")
+            break
+    return all_data
 
 
 def analyze_frequency(draws, num_range):
