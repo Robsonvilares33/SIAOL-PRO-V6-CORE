@@ -306,6 +306,41 @@ def main():
     if ml_results:
         log_to_supabase(f"Fase 3 concluida - ML: {len(ml_results)} loterias analisadas")
 
+    # FASE 3.5: Motor ML Avancado v8 (Markov + Ciclos + Ensemble)
+    print(f"\n{'='*60}")
+    print(f"  FASE 3.5: Motor ML Avancado v8")
+    print(f"  (Markov + Janela Deslizante + Ciclos + Ensemble + Filtro)")
+    print(f"{'='*60}")
+    try:
+        from ml_advanced import generate_advanced_predictions, backtest
+        from ml_engine import save_predictions, fetch_historical_data
+        for lottery in lotteries:
+            draws = fetch_historical_data(lottery, 2000)
+            if len(draws) >= 50:
+                preds_adv, meta = generate_advanced_predictions(lottery, draws, 5)
+                if preds_adv:
+                    for p in preds_adv:
+                        p['ai_enhanced'] = False
+                        p['engine'] = 'SIAOL-PRO-v8-Advanced'
+                    save_predictions(lottery, preds_adv, engine='SIAOL-PRO-v8-Advanced')
+                    top_nums = [n for n, s in meta.get('top_ensemble_numbers', [])[:10]]
+                    print(f"  {lottery}: {len(preds_adv)} pred avancadas | "
+                          f"Markov: {meta.get('markov_built')} | "
+                          f"Ciclos devidos: {meta.get('cycles_detected')} | "
+                          f"Top: {top_nums}")
+                    for p in preds_adv:
+                        print(f"    Jogo {p['game_number']}: {p['numbers']} "
+                              f"(soma={p['sum']}, {p['even_count']}P/{p['odd_count']}I)")
+                    # Injetar dados avancados no ml_results para a IA usar
+                    if lottery in ml_results:
+                        ml_results[lottery]['advanced_predictions'] = preds_adv
+                        ml_results[lottery]['advanced_meta'] = meta
+            else:
+                print(f"  {lottery}: {len(draws)} registros (minimo 50). Execute backfill_collector.py!")
+    except Exception as e:
+        print(f"  Motor avancado indisponivel: {e}")
+        log_to_supabase(f"Motor avancado indisponivel: {e}", "WARN")
+
     # FASE 4: Analise por IA Multi-Cerebro
     print(f"\n{'='*60}")
     print(f"  FASE 4: Analise por IA Multi-Cerebro")
@@ -338,6 +373,27 @@ def main():
     print(f"\n  Total: {total_predictions} predicoes geradas neste ciclo")
     print(f"  Proximo ciclo: amanha ao meio-dia (12:00 BRT)")
     print(f"{'='*60}")
+
+    # FASE 6: Backtesting Automatico (se dados suficientes)
+    try:
+        from ml_advanced import backtest
+        from ml_engine import fetch_historical_data
+        print(f"\n{'='*60}")
+        print(f"  FASE 6: Backtesting (Validacao Cientifica)")
+        print(f"{'='*60}")
+        for lottery in lotteries:
+            draws = fetch_historical_data(lottery, 2000)
+            if len(draws) >= 100:
+                bt = backtest(lottery, draws, test_size=30, num_games=10)
+                if bt:
+                    print(f"  {lottery}: Media {bt['avg_match']:.1f}/{bt['pick']} "
+                          f"({bt['avg_accuracy_pct']:.1f}%) | "
+                          f"Melhor: {bt['best_match']}/{bt['pick']} | "
+                          f"Pior: {bt['worst_match']}/{bt['pick']}")
+            else:
+                print(f"  {lottery}: Dados insuficientes para backtest ({len(draws)}/100)")
+    except Exception as e:
+        print(f"  Backtesting indisponivel: {e}")
 
     log_to_supabase(
         f"SIAOL-PRO v7 ciclo completo. "
