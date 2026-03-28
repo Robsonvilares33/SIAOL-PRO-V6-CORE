@@ -19,6 +19,9 @@ import sys
 import json
 import requests
 from datetime import datetime, timezone, timedelta
+from dotenv import load_dotenv
+
+load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -74,22 +77,18 @@ def log_to_supabase(message, level="INFO"):
 
 
 def get_today_lotteries():
-    """Retorna as loterias que tem sorteio hoje."""
+    """Retorna as loterias que tiveram sorteio no dia anterior."""
     now = datetime.now(BR_TZ)
-    weekday = now.weekday()
+    # Retrocede 1 dia (pois a cron roda 12:00 do dia seguinte para garantir dados estaveis)
+    target_date = now - timedelta(days=1)
+    weekday = target_date.weekday()
+    
     lotteries = LOTTERY_SCHEDULE.get(weekday, [])
+    # Retorna as 'loterias do dia', mas baseadas na rotina cronologica perfeita.
     return lotteries, DAY_NAMES.get(weekday, "Desconhecido"), now
 
 
-def should_collect_data(now):
-    """Determina se deve coletar dados (apos 21h, horario dos sorteios)."""
-    return now.hour >= 21 or now.hour < 6
-
-
-def should_run_analysis(now):
-    """Determina se deve rodar analise ML (apos coleta, ou de manha)."""
-    return now.hour >= 22 or (6 <= now.hour <= 9)
-
+# Funções de should_collect e should_run removidas pois o agendamento será unificado na nuvem.
 
 def run_data_collection(lotteries):
     """Executa coleta de dados para as loterias do dia."""
