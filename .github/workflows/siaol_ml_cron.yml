@@ -1,4 +1,4 @@
-name: SIAOL-PRO v7 Cloud Multi-Brain ML Engine
+name: SIAOL-PRO v8.5-TURBO Cloud Multi-Brain ML Engine
 
 on:
   schedule:
@@ -24,11 +24,13 @@ jobs:
         python -m pip install --upgrade pip
         pip install requests python-dotenv groq google-generativeai
         
-    - name: Acionar Motor Multi-Cerebro SIAOL-PRO v7
+    - name: Acionar Motor Multi-Cerebro SIAOL-PRO v8.5-TURBO
       env:
         SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
         SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       run: |
         python main.py
+

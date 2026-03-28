@@ -40,7 +40,15 @@ PROVIDERS_CONFIG = {
         "priority": 2,
         "max_rpm": 10,
         "max_tokens": 4096,
-    }
+    },
+    "openrouter": {
+        "name": "OpenRouter (Multi-Model Gateway)",
+        "model": "meta-llama/llama-3.3-70b-instruct:free",
+        "env_key": "OPENROUTER_API_KEY",
+        "priority": 3,
+        "max_rpm": 10,
+        "max_tokens": 4096,
+    },
 }
 
 # Prompt de Sistema Loterico - Instrucao Mestra para as IAs
@@ -67,16 +75,36 @@ REGRAS CRITICAS:
 
 
 def _format_historical_context(lottery_type, draws, stat_analysis):
-    """Formata o contexto historico para enviar a IA."""
-    # Extrair ultimos 20 sorteios para contexto direto
-    recent_draws = draws[:20] if len(draws) > 20 else draws
+    """Formata contexto historico AVANCADO com dados de Markov, Pares e Ciclos."""
+    recent_draws = draws[:30] if len(draws) > 30 else draws
     recent_numbers = [d.get("numbers", []) for d in recent_draws]
+
+    # Dados avancados (se disponiveis via stat_analysis)
+    advanced_section = ""
+    adv_meta = stat_analysis.get("advanced_meta", {})
+    adv_preds = stat_analysis.get("advanced_predictions", [])
+
+    if adv_meta:
+        top_nums = [n for n, s in adv_meta.get("top_ensemble_numbers", [])[:15]]
+        advanced_section = f"""
+
+ANALISE AVANCADA (Motor ML v8.5-TURBO com Markov + Ciclos + Ensemble):
+- Top 15 numeros do Ensemble (Markov+Frequencia+Gaps+Ciclos+Pares+Tendencia): {json.dumps(top_nums)}
+- Range de soma ideal (baseado em historico): {json.dumps(adv_meta.get('sum_range'))}
+- Distribuicao par/impar ideal: {json.dumps(adv_meta.get('even_range'))}
+- Consecutivos ideal: {json.dumps(adv_meta.get('consec_range'))}
+- Ciclos devidos (numeros atrasados com padrão regular): {adv_meta.get('cycles_detected', 0)}
+- Markov ativo: {adv_meta.get('markov_built', False)}
+"""
+    if adv_preds:
+        pred_nums = [p.get("numbers", []) for p in adv_preds[:3]]
+        advanced_section += f"- Top 3 jogos gerados pelo ML avancado: {json.dumps(pred_nums)}\n"
 
     context = f"""
 LOTERIA: {lottery_type.upper()}
 TOTAL DE SORTEIOS ANALISADOS: {len(draws)}
 
-ULTIMOS 20 SORTEIOS (do mais recente ao mais antigo):
+ULTIMOS 30 SORTEIOS (do mais recente ao mais antigo):
 {json.dumps(recent_numbers, indent=2)}
 
 ANALISE ESTATISTICA COMPUTADA:
@@ -86,6 +114,11 @@ ANALISE ESTATISTICA COMPUTADA:
 - Desvio Padrao: {stat_analysis.get('sum_std', 0)}
 - Range Ideal de Soma: {json.dumps(stat_analysis.get('sum_target_range', [0, 0]))}
 - Maiores Gaps: {json.dumps(stat_analysis.get('high_gaps', []))}
+{advanced_section}
+
+IMPORTANTE: Voce deve usar os dados do Motor ML avancado acima como REFERENCIA PRINCIPAL.
+Os numeros do Top 15 Ensemble sao os que o algoritmo de Machine Learning (com Markov, Ciclos,
+Pares e Tendencias) calculou como mais provaveis. Use-os como base para sua analise.
 
 TAREFA: Analise esses dados e retorne um JSON com o seguinte formato:
 {{
@@ -204,17 +237,53 @@ def _query_gemini(prompt, system_prompt=SYSTEM_PROMPT):
 
 
 # ============================================================
-# MOTOR PRINCIPAL: ALTERNANCIA INTELIGENTE (FAILOVER)
+# PROVEDOR 3: OPENROUTER (Gateway Multi-Modelo)
+# ============================================================
+
+def _query_openrouter(prompt, system_prompt=SYSTEM_PROMPT):
+    """Consulta a API do OpenRouter (acesso gratuito a dezenas de modelos)."""
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        raise ValueError("OPENROUTER_API_KEY nao configurada")
+
+    import requests
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/Robsonvilares33/SIAOL-PRO-V6-CORE",
+        "X-Title": "SIAOL-PRO v8.5",
+    }
+    payload = {
+        "model": PROVIDERS_CONFIG["openrouter"]["model"],
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.3,
+        "max_tokens": PROVIDERS_CONFIG["openrouter"]["max_tokens"],
+        "response_format": {"type": "json_object"},
+    }
+    resp = requests.post(url, headers=headers, json=payload, timeout=60)
+    resp.raise_for_status()
+    data = resp.json()
+    content = data["choices"][0]["message"]["content"]
+    return json.loads(content)
+
+
+# ============================================================
+# MOTOR PRINCIPAL: ALTERNANCIA INTELIGENTE (FAILOVER 3-NIVEL)
 # ============================================================
 
 def query_ai(prompt, system_prompt=SYSTEM_PROMPT):
     """
     Consulta IAs com failover automatico.
-    Ordem: Groq -> Gemini -> None
+    Ordem: Groq -> Gemini -> OpenRouter -> None
     """
     providers = [
         ("groq", _query_groq),
         ("gemini", _query_gemini),
+        ("openrouter", _query_openrouter),
     ]
 
     for provider_name, query_fn in providers:
@@ -244,6 +313,7 @@ def get_ai_consensus(lottery_type, draws, stat_analysis):
     providers = [
         ("groq", _query_groq),
         ("gemini", _query_gemini),
+        ("openrouter", _query_openrouter),
     ]
 
     for provider_name, query_fn in providers:
