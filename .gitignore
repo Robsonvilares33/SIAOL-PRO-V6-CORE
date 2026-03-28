@@ -1,0 +1,10 @@
+# Variáveis de Ambiente Confidenciais
+.env
+
+# Pastas de Cache do Python
+__pycache__/
+*.pyc
+
+# Venvs
+venv/
+env/
