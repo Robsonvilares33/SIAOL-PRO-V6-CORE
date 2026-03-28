@@ -331,6 +331,11 @@ def main():
                     for p in preds_adv:
                         print(f"    Jogo {p['game_number']}: {p['numbers']} "
                               f"(soma={p['sum']}, {p['even_count']}P/{p['odd_count']}I)")
+                    
+                    # Alerta via Telegram (SIAOL-PRO v9.0)
+                    from telegram_engine import telegram
+                    telegram.send_prediction_alert(lottery, preds_adv)
+
                     # Injetar dados avancados no ml_results para a IA usar
                     if lottery in ml_results:
                         ml_results[lottery]['advanced_predictions'] = preds_adv

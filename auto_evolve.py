@@ -695,6 +695,10 @@ def run_evolution_cycle(lottery_type="lotofacil"):
                 "improvement": round(improvement, 4),
                 "fitness": round(mutant_fitness, 4),
             })
+            
+            # Enviar alerta via Telegram
+            from telegram_engine import telegram
+            telegram.send_evolution_alert(generation, desc, best_fitness - improvement, mutant_fitness)
         else:
             if improvement > 0:
                 print(f"  [SELECAO] ~ Melhoria minima (+{improvement:.3f} < {cfg['min_improvement']}), rejeitado")
