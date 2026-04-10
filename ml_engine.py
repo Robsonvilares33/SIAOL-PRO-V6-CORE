@@ -328,7 +328,8 @@ def generate_prediction(lottery_type, draws, num_games=5):
             if q_min <= n <= q_max:
                 quad_bonus = 10
 
-        scores[n] = max(0, freq_score + gap_score + balance_score + trend_bonus + quad_bonus)
+        even_bonus = 15 if n % 2 == 0 else 0  # Bonus para numeros pares
+        scores[n] = max(0, freq_score + gap_score + balance_score + trend_bonus + quad_bonus + even_bonus)
 
     # Gerar jogos
     predictions = []
