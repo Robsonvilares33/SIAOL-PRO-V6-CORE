@@ -51,17 +51,31 @@ class LlamaBridge:
         print(f"[ANALYZE] Analisando padrões de {lottery_type} com Llama...")
 
         prompt = f"""
-        Você é um especialista em análise estatística de loterias brasileiras.
+        Você é um especialista em análise estatística de loterias brasileiras e um crítico rigoroso de suas próprias conclusões.
+        Seu objetivo é realizar uma análise profunda e autocrítica para gerar as melhores predições possíveis.
         
         Tipo de Loteria: {lottery_type}
         Últimos 50 sorteios: {json.dumps(historical_data[-50:], indent=2)}
         
-        Baseado nesses dados históricos, identifique:
-        1. Números mais frequentes (hot numbers)
-        2. Números menos frequentes (cold numbers)
-        3. Padrões de sequências consecutivas
-        4. Distribuição par/ímpar
-        5. Recomendações para {num_predictions} jogos estratégicos
+        Siga o processo de Cadeia de Pensamento (Chain of Thought) abaixo para chegar à sua conclusão:
+        
+        **Passo 1: Análise Inicial**
+        Baseado nos dados históricos fornecidos, faça uma análise inicial para identificar:
+        - Números mais frequentes (hot numbers)
+        - Números menos frequentes (cold numbers)
+        - Padrões de sequências consecutivas (se houver)
+        - Distribuição par/ímpar
+        - Uma primeira proposta de {num_predictions} jogos estratégicos.
+        
+        **Passo 2: Crítica Interna (Anti-Sycophancy)**
+        Agora, atue como seu próprio "Advogado do Diabo". Questione as predições iniciais. Quais são as fraquezas estatísticas? Há algum viés óbvio? Considere:
+        - Salto de Dezena (números muito agrupados ou muito espalhados)
+        - Padrões de Vácuo (números de baixa frequência que não saem há muito tempo)
+        - Simetria (distribuição dos números no volante)
+        - Padrões de DNA (sequências ou repetições improváveis)
+        
+        **Passo 3: Refinamento e Predição Final**
+        Com base na análise inicial e na crítica interna, refine suas predições. Qual é a melhor proposta de {num_predictions} jogos estratégicos agora? Justifique a escolha final, abordando as fraquezas identificadas e como elas foram mitigadas ou aceitas.
         
         Responda em JSON com a seguinte estrutura:
         {{
@@ -69,9 +83,12 @@ class LlamaBridge:
             "cold_numbers": [lista de números frios],
             "sequences": [padrões detectados],
             "even_odd_ratio": razão par/ímpar,
-            "recommended_games": [lista de {num_predictions} jogos recomendados],
+            "initial_recommended_games": [lista de {num_predictions} jogos recomendados na análise inicial],
+            "weaknesses_identified": [lista de fraquezas encontradas na crítica interna],
+            "counter_arguments_to_weaknesses": [lista de contra-argumentos ou justificativas para as fraquezas],
+            "final_recommended_games": [lista de {num_predictions} jogos recomendados após o refinamento],
             "confidence": score de confiança (0-100),
-            "reasoning": explicação breve
+            "reasoning": explicação detalhada do processo de CoT, incluindo análise inicial, crítica e refinamento.
         }}
         """
 
