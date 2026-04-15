@@ -50,10 +50,19 @@ def log_to_supabase(message, level="INFO"):
         pass
 
 
-def fetch_historical_data(lottery_type, limit=200):
+def fetch_historical_data(lottery_type, limit=200, config=None):
     """Busca dados historicos do Supabase COM PAGINACAO para superar o limite de 1000 linhas."""
     if not SUPABASE_URL or not SUPABASE_KEY:
-        return []
+        # Retornar dados simulados para testes se as chaves do Supabase nao estiverem configuradas
+        print("WARN: SUPABASE_URL ou SUPABASE_KEY nao configurados. Usando dados simulados para fetch_historical_data.")
+        if config is None:
+            config = LOTTERY_CONFIG[lottery_type]
+        num_range = config["range"]
+        mock_draws = []
+        for i in range(limit):
+            numbers = sorted(random.sample(range(num_range[0], num_range[1] + 1), config["pick"]))
+            mock_draws.append({"draw_number": i + 1, "draw_date": datetime.now().isoformat(), "numbers": numbers})
+        return mock_draws
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}"
@@ -281,10 +290,10 @@ def analyze_trends(draws, num_range, window=10):
 
 
 # ============================================================
-# GERADOR DE PREDICOES (ATUALIZADO v7)
+# GERADOR DE PREDICOES (ATUALIZADO v11.1)
 # ============================================================
 
-def generate_prediction(lottery_type, draws, num_games=5):
+def generate_prediction(lottery_type, draws, num_games=5, even_preference_weight=0.1):
     """Gera predicoes baseadas em analise estatistica avancada."""
     config = LOTTERY_CONFIG[lottery_type]
     num_range = config["range"]
@@ -303,13 +312,18 @@ def generate_prediction(lottery_type, draws, num_games=5):
     quad_analysis = analyze_quadrants(draws, num_range)
     trend_analysis = analyze_trends(draws, num_range)
 
-    # Score composto: frequencia + gaps + tendencia + quadrantes
+    # Score composto: frequencia + gaps + tendencia + quadrantes + preferencia por pares
     scores = {}
     for n in range(min_n, max_n + 1):
         freq_score = freq_analysis.get(n, {}).get("frequency", 0) * 35
         gap_score = min(gap_analysis.get(n, 0) / max(len(draws), 1), 1) * 25
         deviation = freq_analysis.get(n, {}).get("deviation", 0)
         balance_score = (1 - abs(deviation)) * 20
+
+        # Adicionar bonus para numeros pares, se houver preferencia
+        even_bonus = 0
+        if n % 2 == 0:
+            even_bonus = even_preference_weight * 10 # Ajustar peso conforme necessidade
 
         # Bonus de tendencia
         trend_info = trend_analysis.get(n, {})
@@ -319,197 +333,140 @@ def generate_prediction(lottery_type, draws, num_games=5):
         elif trend_info.get("trend") == "FALLING":
             trend_bonus = -5
 
-        # Bonus de quadrante (numeros do quadrante menos ativo ganham bonus)
+        # Bonus de quadrante
         quad_bonus = 0
-        least_active_q = quad_analysis.get("least_active", "Q1")
-        q_ranges = quad_analysis.get("quadrant_ranges", {})
-        if least_active_q in q_ranges:
-            q_min, q_max = q_ranges[least_active_q]
-            if q_min <= n <= q_max:
-                quad_bonus = 10
+        most_active_q = quad_analysis["most_active"]
+        q_min, q_max = quad_analysis["quadrant_ranges"][most_active_q]
+        if q_min <= n <= q_max:
+            quad_bonus = 10
 
-        even_bonus = 15 if n % 2 == 0 else 0  # Bonus para numeros pares
-        scores[n] = max(0, freq_score + gap_score + balance_score + trend_bonus + quad_bonus + even_bonus)
+        scores[n] = freq_score + gap_score + balance_score + even_bonus + trend_bonus + quad_bonus
 
     # Gerar jogos
     predictions = []
     for game_idx in range(num_games):
-        game_numbers = []
-        available = list(range(min_n, max_n + 1))
-        weights = [scores.get(n, 0) + random.uniform(0, 8) for n in available]
+        # Selecionar os numeros com maior score
+        predicted_numbers = []
+        sorted_scores = sorted(scores.items(), key=lambda item: item[1], reverse=True)
 
-        for _ in range(pick):
-            if not available:
+        for num, score in sorted_scores:
+            if num not in predicted_numbers:
+                predicted_numbers.append(num)
+            if len(predicted_numbers) == pick:
                 break
-            total_weight = sum(weights)
-            if total_weight == 0:
-                idx = random.randint(0, len(available) - 1)
-            else:
-                r = random.uniform(0, total_weight)
-                cumulative = 0
-                idx = 0
-                for i, w in enumerate(weights):
-                    cumulative += w
-                    if cumulative >= r:
-                        idx = i
-                        break
 
-            game_numbers.append(available[idx])
-            available.pop(idx)
-            weights.pop(idx)
+        # Ajuste para garantir a preferencia por numeros pares
+        even_count = sum(1 for n in predicted_numbers if n % 2 == 0)
+        target_even_count = math.ceil(pick / 2) # Tentar ter pelo menos metade de numeros pares
 
-        game_numbers.sort()
-        game_sum = sum(game_numbers)
-        target_min, target_max = sum_dist.get("target_range", (0, 9999))
+        if even_count < target_even_count:
+            # Tentar trocar numeros impares por pares de alto score que nao foram selecionados
+            odd_numbers_in_prediction = [n for n in predicted_numbers if n % 2 != 0]
+            even_numbers_available = [n for n, score in sorted_scores if n % 2 == 0 and n not in predicted_numbers]
 
-        predictions.append({
-            "game_number": game_idx + 1,
-            "numbers": game_numbers,
-            "sum": game_sum,
-            "sum_in_range": target_min <= game_sum <= target_max,
-            "even_count": sum(1 for n in game_numbers if n % 2 == 0),
-            "odd_count": sum(1 for n in game_numbers if n % 2 != 0)
-        })
+            num_to_swap = target_even_count - even_count
+            for _ in range(num_to_swap):
+                if odd_numbers_in_prediction and even_numbers_available:
+                    # Trocar o impar de menor score pelo par de maior score disponivel
+                    odd_to_remove = min(odd_numbers_in_prediction, key=lambda x: scores.get(x, 0))
+                    even_to_add = max(even_numbers_available, key=lambda x: scores.get(x, 0))
+
+                    predicted_numbers.remove(odd_to_remove)
+                    predicted_numbers.append(even_to_add)
+                    odd_numbers_in_prediction.remove(odd_to_remove)
+                    even_numbers_available.remove(even_to_add)
+                else:
+                    break
+            predicted_numbers = sorted(predicted_numbers)
+
+        # Garantir que a soma dos numeros esteja dentro de um range razoavel
+        current_sum = sum(predicted_numbers)
+        if not (sum_dist["target_range"][0] <= current_sum <= sum_dist["target_range"][1]):
+            log_to_supabase(f"Soma da predicao fora do range para {lottery_type}. Tentando ajustar.", "WARN")
+            if abs(current_sum - sum_dist["mean"]) > sum_dist["std"] * 2:
+                log_to_supabase(f"Soma muito fora do padrao. Re-gerando predicao para {lottery_type}.", "WARN")
+                # Evitar recursao infinita, apenas logar e retornar o que tem
+                log_to_supabase(f"Predicao gerada para {config['name']} (soma fora do padrao): {predicted_numbers}", "WARN")
+                predictions.append(predicted_numbers)
+                continue
+
+        log_to_supabase(f"Predicao gerada para {config['name']}: {predicted_numbers}", "INFO")
+        predictions.append(predicted_numbers)
 
     return predictions
 
 
-def save_predictions(lottery_type, predictions, engine="SIAOL-PRO-v7-MultiAI"):
-    """Salva predicoes no Supabase."""
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        return False
-
-    url = f"{SUPABASE_URL}/rest/v1/lottery_predictions"
-    headers = {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "return=minimal"
-    }
-
-    for pred in predictions:
-        confidence = 0.5
-        if pred.get("ai_enhanced"):
-            consensus_count = pred.get("consensus_count", 0)
-            confidence = min(0.5 + (consensus_count * 0.05), 0.95)
-
-        payload = {
-            "lottery_type": lottery_type,
-            "predicted_numbers": pred["numbers"],
-            "confidence": confidence,
-            "metadata": {
-                "game_number": pred.get("game_number", 0),
-                "sum": pred.get("sum", 0),
-                "sum_in_range": pred.get("sum_in_range", False),
-                "even_odd": f"{pred.get('even_count', 0)}P/{pred.get('odd_count', 0)}I",
-                "consensus_count": pred.get("consensus_count", 0),
-                "ai_enhanced": pred.get("ai_enhanced", False),
-                "generated_at": datetime.now().isoformat(),
-                "engine": engine
-            }
-        }
-        try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=10)
-            if resp.status_code != 201:
-                print(f"Erro ao salvar predicao: {resp.status_code}")
-        except Exception as e:
-            print(f"Erro ao salvar predicao: {e}")
-
-    return True
-
-
-def get_stat_summary(draws, num_range):
-    """Retorna resumo estatistico para enviar ao ai_brain."""
-    freq = analyze_frequency(draws, num_range)
-    gaps = analyze_gaps(draws, num_range)
-    sum_dist = analyze_sum_distribution(draws)
-
-    hot = sorted(freq.items(), key=lambda x: x[1]["count"], reverse=True)[:10]
-    cold = sorted(freq.items(), key=lambda x: x[1]["count"])[:10]
-    high_gaps = sorted(gaps.items(), key=lambda x: x[1], reverse=True)[:10]
-
-    return {
-        "hot_numbers": [n for n, _ in hot],
-        "cold_numbers": [n for n, _ in cold],
-        "sum_mean": sum_dist.get("mean", 0),
-        "sum_std": sum_dist.get("std", 0),
-        "sum_target_range": list(sum_dist.get("target_range", (0, 0))),
-        "high_gaps": [{"number": n, "gap": g} for n, g in high_gaps],
-    }
-
-
-def run_analysis(lottery_type):
-    """Executa analise completa para uma loteria (estatistica pura)."""
+def run_analysis_and_predict(lottery_type, num_games=5, even_preference_weight=0.1):
     config = LOTTERY_CONFIG[lottery_type]
-    print(f"\n=== Analise Estatistica {config['name']} ===")
+    """Funcao principal para orquestrar a analise e predicao."""
+    log_to_supabase(f"Iniciando ciclo de analise para {lottery_type}...", "INFO")
+    config = LOTTERY_CONFIG[lottery_type]
 
-    draws = fetch_historical_data(lottery_type, 200)
-    if len(draws) < 5:
-        print(f"  Dados insuficientes ({len(draws)} sorteios). Pulando.")
-        return None
+    # 1. Buscar dados
+    draws = fetch_historical_data(lottery_type, limit=500, config=config) # Aumentar limite para analise mais profunda
+    if not draws:
+        log_to_supabase(f"Nao foi possivel obter dados para {lottery_type}.", "ERROR")
+        return None, None
 
-    print(f"  {len(draws)} sorteios carregados.")
-
-    # Analises completas
-    freq = analyze_frequency(draws, config["range"])
-    gaps = analyze_gaps(draws, config["range"])
-    sum_dist = analyze_sum_distribution(draws)
-    even_odd = analyze_even_odd(draws)
-    sequences = analyze_sequences(draws, config["range"])
-    quadrants = analyze_quadrants(draws, config["range"])
-    trends = analyze_trends(draws, config["range"])
-
-    # Top numeros
-    hot_numbers = sorted(freq.items(), key=lambda x: x[1]["count"], reverse=True)[:10]
-    cold_numbers = sorted(freq.items(), key=lambda x: x[1]["count"])[:10]
-    high_gap = sorted(gaps.items(), key=lambda x: x[1], reverse=True)[:10]
-
-    # Numeros em tendencia de alta
-    rising = [n for n, info in trends.items() if info.get("trend") == "RISING"]
-
-    print(f"  Numeros quentes: {[n for n, _ in hot_numbers]}")
-    print(f"  Numeros frios: {[n for n, _ in cold_numbers]}")
-    print(f"  Maior gap: {[f'{n}({g})' for n, g in high_gap[:5]]}")
-    print(f"  Soma media: {sum_dist['mean']} (range: {sum_dist.get('target_range', 'N/A')})")
-    print(f"  Consecutivos: {sequences['consecutive_pairs_pct']}% pares, {sequences['consecutive_trios_pct']}% trios")
-    print(f"  Quadrante mais ativo: {quadrants['most_active']} ({quadrants['distribution_pct']})")
-    print(f"  Numeros em ALTA: {rising[:10]}")
-
-    # Gerar predicoes
-    predictions = generate_prediction(lottery_type, draws, num_games=5)
-    if predictions:
-        save_predictions(lottery_type, predictions, engine="SIAOL-PRO-v7-Stats")
-        print(f"  {len(predictions)} predicoes estatisticas geradas e salvas.")
-        for p in predictions:
-            print(f"    Jogo {p['game_number']}: {p['numbers']} (soma={p['sum']}, {p['even_count']}P/{p['odd_count']}I)")
-
-    return {
-        "lottery": config["name"],
-        "draws_analyzed": len(draws),
-        "draws": draws,
-        "hot_numbers": [n for n, _ in hot_numbers],
-        "cold_numbers": [n for n, _ in cold_numbers],
-        "sum_stats": sum_dist,
-        "predictions": predictions,
-        "stat_summary": get_stat_summary(draws, config["range"]),
+    # 2. Realizar analises
+    full_analysis = {
+        "lottery_type": lottery_type,
+        "generated_at": datetime.now().isoformat(),
+        "total_draws_analyzed": len(draws),
+        "frequency": analyze_frequency(draws, config["range"]),
+        "gaps": analyze_gaps(draws, config["range"]),
+        "pairs": analyze_pairs(draws),
+        "sum_distribution": analyze_sum_distribution(draws),
+        "even_odd": analyze_even_odd(draws),
+        "sequences": analyze_sequences(draws, config["range"]),
+        "quadrants": analyze_quadrants(draws, config["range"]),
+        "trends": analyze_trends(draws, config["range"])
     }
 
+    # 3. Gerar predicoes
+    predictions = generate_prediction(lottery_type, draws, num_games, even_preference_weight)
 
-def run_all_analyses():
-    """Executa analise para todas as loterias."""
-    log_to_supabase("Iniciando ciclo de analise ML v7 para todas as loterias.")
-    results = {}
-
-    for lottery_type in LOTTERY_CONFIG:
-        result = run_analysis(lottery_type)
-        if result:
-            results[lottery_type] = result
-
-    summary = f"Analise ML v7 concluida. Loterias analisadas: {len(results)}"
-    print(f"\n{summary}")
-    log_to_supabase(summary)
-    return results
+    log_to_supabase(f"Ciclo de analise para {lottery_type} concluido.", "INFO")
+    return full_analysis, predictions
 
 
-if __name__ == "__main__":
-    run_all_analyses()
+if __name__ == '__main__':
+    # Exemplo de uso
+    LOTTERY = "megasena"
+    NUM_GAMES_TO_PREDICT = 10
+    EVEN_PREFERENCE = 0.2 # Aumentar o peso para dar mais preferencia a pares
+
+    analysis_results, final_predictions = run_analysis_and_predict(LOTTERY, NUM_GAMES_TO_PREDICT, EVEN_PREFERENCE)
+
+    if analysis_results and final_predictions:
+        print("\n" + "="*50)
+        print(f"  ANALISE E PREDICAO - {LOTTERY_CONFIG[LOTTERY]['name'].upper()}")
+        print("="*50 + "\n")
+
+        print(f"-> Analise baseada em {analysis_results['total_draws_analyzed']} sorteios.")
+        most_common_even_odd = analysis_results['even_odd']['most_common'][0] if analysis_results['even_odd']['most_common'] else "N/A"
+        print(f"-> Tendencia de Pares/Impares mais comum: {most_common_even_odd}")
+        print(f"-> Quadrante mais ativo: {analysis_results['quadrants']['most_active']}")
+        print("\n" + "-"*50)
+        print("  PREDICOES GERADAS")
+        print("-"*50)
+        for i, pred in enumerate(final_predictions):
+            print(f"  Jogo {i+1:02d}: {sorted(pred)}")
+        print("\n" + "="*50)
+
+        # Converter chaves de tupla para string no dicionario even_odd para serializacao JSON
+        if 'even_odd' in analysis_results and 'distributions' in analysis_results['even_odd']:
+            analysis_results['even_odd']['distributions'] = {str(k): v for k, v in analysis_results['even_odd']['distributions'].items()}
+        
+        # Salvar analise em JSON
+        output_filename = f"analysis_{LOTTERY}.json"
+        with open(output_filename, 'w') as f:
+            json.dump(analysis_results, f, indent=2)
+        print(f"\nRelatorio de analise completo salvo em: {output_filename}")
+
+        # Salvar predicoes em TXT
+        preds_filename = f"predictions_{LOTTERY}.txt"
+        with open(preds_filename, 'w') as f:
+            for pred in final_predictions:
+                f.write(','.join(map(str, sorted(pred))) + '\n')
+        print(f"Predicoes salvas em: {preds_filename}")
