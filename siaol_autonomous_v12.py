@@ -26,10 +26,13 @@ load_dotenv()
 # ===================== CONFIGURAÇÕES =====================
 OLLAMA_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8000456036:AAHbQ-_mu_LyENSBGNNOscjqN3kBQM3AHro")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "YOUR_GROQ_API_KEY")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "5096280712")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+AI_ENGINE = "groq"  # "groq" (primário) ou "ollama" (fallback)
 
 LOTTERY_CONFIG = {
     "megasena":  {"name": "Mega-Sena",  "pick": 6,  "range": 60,  "games": 10, "api": "megasena"},
@@ -483,8 +486,38 @@ def backtest_strategy(draws, num_range, pick, num_test_draws=20):
     }
 
 
-# ===================== IA LOCAL (OLLAMA) =====================
+# ===================== IA MULTI-ENGINE (GROQ + OLLAMA) =====================
+def ask_groq(prompt, max_tokens=2000):
+    """Motor primário: Groq Cloud (Llama-3.3-70B - ultra potente)"""
+    log(f"Consultando Groq Cloud ({GROQ_MODEL})...", "AI")
+    try:
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": GROQ_MODEL,
+                "messages": [{"role": "system", "content": "Você é o SIAOL-PRO AGI, um sistema avançado de análise estatística. Responda APENAS em JSON quando solicitado."}, {"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+                "temperature": 0.3
+            },
+            timeout=60
+        )
+        if resp.status_code == 200:
+            result = resp.json()["choices"][0]["message"]["content"]
+            log(f"Groq respondeu ({len(result)} chars) via {GROQ_MODEL}.", "AI")
+            return result
+        else:
+            log(f"Groq erro {resp.status_code}: {resp.text[:200]}", "ERR")
+            return ""
+    except Exception as e:
+        log(f"Erro Groq: {e}", "ERR")
+        return ""
+
 def ask_ollama(prompt, max_tokens=2000):
+    """Motor secundário: Ollama local (fallback)"""
     log(f"Consultando IA local ({OLLAMA_MODEL})...", "AI")
     try:
         resp = requests.post(
@@ -499,7 +532,7 @@ def ask_ollama(prompt, max_tokens=2000):
         )
         if resp.status_code == 200:
             result = resp.json().get("response", "")
-            log(f"IA respondeu ({len(result)} chars).", "AI")
+            log(f"Ollama respondeu ({len(result)} chars).", "AI")
             return result
         else:
             log(f"Ollama erro {resp.status_code}", "ERR")
@@ -507,6 +540,21 @@ def ask_ollama(prompt, max_tokens=2000):
     except Exception as e:
         log(f"Erro Ollama: {e}", "ERR")
         return ""
+
+def ask_ai(prompt, max_tokens=2000):
+    """Motor inteligente: tenta Groq primeiro (70B), fallback para Ollama local"""
+    # Tentar Groq primeiro (muito mais potente: 70B params)
+    if GROQ_API_KEY:
+        result = ask_groq(prompt, max_tokens)
+        if result:
+            return result
+        log("Groq falhou, tentando Ollama local...", "WARN")
+    # Fallback para Ollama
+    result = ask_ollama(prompt, max_tokens)
+    if result:
+        return result
+    log("Ambos motores de IA falharam. Usando fallback estatístico.", "ERR")
+    return ""
 
 
 def ai_analyze_and_refine(lottery_name, freq, gaps, even_ratio, thesis_scores,
@@ -527,7 +575,7 @@ BACKTESTING: média {backtest_results.get('avg_hits', 0):.1f} acertos, max {back
 Retorne JSON:
 {{"strategy":"texto","hot_numbers":[10 nums],"cold_numbers":[10 nums],"avoid_numbers":[5 nums],"confidence":0.0-1.0,"dominant_thesis":"nome"}}"""
 
-    response = ask_ollama(prompt, max_tokens=500)
+    response = ask_ai(prompt, max_tokens=500)
     try:
         js = response[response.find("{"):response.rfind("}") + 1]
         if js:
@@ -555,7 +603,7 @@ def ai_anti_sycophancy_check(games, lottery_name, pick):
 Retorne APENAS JSON:
 {{"approval":true/false,"weaknesses":["lista"],"suggestions":["lista"],"quality_score":0-100}}"""
 
-    response = ask_ollama(prompt, max_tokens=500)
+    response = ask_ai(prompt, max_tokens=500)
     try:
         js = response[response.find("{"):response.rfind("}") + 1]
         if js:
