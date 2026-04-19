@@ -174,27 +174,42 @@ def ask_ai(prompt, temperature=0.7):
 # COLETA DE DADOS REAIS
 # ============================================================
 def fetch_lottery_data(lottery_type, num_contests=60):
-    """Coleta dados reais da API da Caixa"""
+    """Coleta dados reais - API Heroku (primária) + API Caixa (fallback)"""
     config = LOTTERY_CONFIGS[lottery_type]
     api_name = config["api"]
-    base_url = f"https://servicebus2.caixa.gov.br/portaldeloterias/api/{api_name}"
+    
+    # APIs disponíveis (ordem de prioridade)
+    apis = [
+        {"name": "Heroku", "base": f"https://loteriascaixa-api.herokuapp.com/api/{api_name}", "latest_suffix": "/latest", "history_fmt": "/{num}", "num_key": "concurso", "nums_key": "dezenas", "date_key": "data"},
+        {"name": "Caixa", "base": f"https://servicebus2.caixa.gov.br/portaldeloterias/api/{api_name}", "latest_suffix": "", "history_fmt": "/{num}", "num_key": "numero", "nums_key": "listaDezenas", "date_key": "dataApuracao"},
+    ]
     
     log(f"📊 Coletando dados da {config['name']}...")
     
-    # Pegar último concurso
-    try:
-        r = requests.get(base_url, timeout=15)
-        if r.status_code == 200:
-            latest = r.json()
-            latest_num = latest.get("numero", 0)
-            latest_numbers = sorted(latest.get("listaDezenas", latest.get("dezenasSorteadasOrdemSorteio", [])))
-            latest_numbers = [int(n) for n in latest_numbers]
-            log(f"Último concurso: #{latest_num} - {latest_numbers}")
-        else:
-            log(f"API retornou {r.status_code}", "WARN")
-            return [], None
-    except Exception as e:
-        log(f"Erro na API: {e}", "WARN")
+    latest = None
+    latest_num = 0
+    active_api = None
+    
+    # Tentar cada API
+    for api in apis:
+        try:
+            url = api["base"] + api["latest_suffix"]
+            r = requests.get(url, timeout=15)
+            if r.status_code == 200:
+                latest = r.json()
+                latest_num = latest.get(api["num_key"], 0)
+                raw_nums = latest.get(api["nums_key"], latest.get("dezenasSorteadasOrdemSorteio", []))
+                latest_numbers = sorted([int(n) for n in raw_nums])
+                log(f"✅ API {api['name']}: Concurso #{latest_num} - {latest_numbers}")
+                active_api = api
+                break
+            else:
+                log(f"API {api['name']} retornou {r.status_code}", "WARN")
+        except Exception as e:
+            log(f"API {api['name']} falhou: {e}", "WARN")
+    
+    if not active_api:
+        log("❌ Todas as APIs falharam", "ERROR")
         return [], None
     
     # Coletar histórico
@@ -204,21 +219,23 @@ def fetch_lottery_data(lottery_type, num_contests=60):
         if contest_num < 1:
             break
         try:
-            r = requests.get(f"{base_url}/{contest_num}", timeout=10)
+            url = active_api["base"] + active_api["history_fmt"].format(num=contest_num)
+            r = requests.get(url, timeout=10)
             if r.status_code == 200:
                 data = r.json()
-                nums = sorted([int(n) for n in data.get("listaDezenas", data.get("dezenasSorteadasOrdemSorteio", []))])
+                raw_nums = data.get(active_api["nums_key"], data.get("dezenasSorteadasOrdemSorteio", []))
+                nums = sorted([int(n) for n in raw_nums])
                 if nums:
                     contests.append({
                         "number": contest_num,
-                        "date": data.get("dataApuracao", ""),
+                        "date": data.get(active_api["date_key"], ""),
                         "numbers": nums
                     })
             time.sleep(0.15)
         except:
             continue
     
-    log(f"✅ {len(contests)} concursos coletados")
+    log(f"✅ {len(contests)} concursos coletados via {active_api['name']}")
     return contests, latest
 
 # ============================================================

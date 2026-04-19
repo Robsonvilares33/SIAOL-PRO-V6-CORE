@@ -21,7 +21,7 @@ OLLAMA_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
 # Garantir que o modelo correto está sendo usado
 print(f"[CONFIG] Modelo Ollama: {OLLAMA_MODEL}")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8000456036:AAHbQ-_mu_LyENSBGNNOscjqN3kBQM3AHro")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN_PLACEHOLDER")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "5096280712")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")

@@ -21,9 +21,9 @@ load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://ynfcmmwxfabdkqstsqkr.supabase.co")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "YOUR_GROQ_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "GROQ_API_KEY_PLACEHOLDER")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN_PLACEHOLDER")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "5096280712")
 
 HEADERS = {
