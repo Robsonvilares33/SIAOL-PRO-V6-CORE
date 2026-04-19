@@ -11,12 +11,15 @@ import json
 import os
 import requests
 from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
 
 app = FastAPI(title="SIAOL-PRO Symbiosis API", version="1.0")
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://ynfcmmwxfabdkqstsqkr.supabase.co")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "YOUR_SUPABASE_KEY")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "YOUR_GROQ_API_KEY")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip('"')
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip('"')
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip('"')
 
 HEADERS = {
     "apikey": SUPABASE_KEY,
