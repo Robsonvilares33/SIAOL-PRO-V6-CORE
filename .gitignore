@@ -1,10 +1,2 @@
-# Variáveis de Ambiente Confidenciais
+# Ignorar credenciais
 .env
-
-# Pastas de Cache do Python
-__pycache__/
-*.pyc
-
-# Venvs
-venv/
-env/

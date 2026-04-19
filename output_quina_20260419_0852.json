@@ -1,0 +1,150 @@
+{
+  "version": "v12.0",
+  "lottery": "Quina",
+  "games": [
+    [
+      7,
+      25,
+      44,
+      56,
+      74
+    ],
+    [
+      4,
+      25,
+      33,
+      44,
+      74
+    ],
+    [
+      7,
+      17,
+      30,
+      44,
+      74
+    ],
+    [
+      2,
+      25,
+      35,
+      56,
+      74
+    ],
+    [
+      7,
+      12,
+      29,
+      44,
+      74
+    ],
+    [
+      4,
+      25,
+      44,
+      49,
+      56
+    ],
+    [
+      7,
+      29,
+      30,
+      44,
+      56
+    ],
+    [
+      7,
+      25,
+      32,
+      44,
+      72
+    ],
+    [
+      2,
+      25,
+      44,
+      63,
+      74
+    ],
+    [
+      15,
+      37,
+      44,
+      56,
+      74
+    ]
+  ],
+  "analysis": {
+    "strategy": "texto",
+    "hot_numbers": [
+      44,
+      7,
+      26,
+      9,
+      25,
+      56,
+      74,
+      1,
+      14,
+      21
+    ],
+    "cold_numbers": [
+      50,
+      69,
+      70,
+      71,
+      36,
+      76,
+      42,
+      43,
+      4,
+      17
+    ],
+    "avoid_numbers": [
+      5,
+      6,
+      44,
+      74,
+      56
+    ],
+    "confidence": 0.8,
+    "dominant_thesis": "Simetria Espelhada"
+  },
+  "thesis_scores": {
+    "DNA Numérico": 10,
+    "Vácuo Estatístico": 95,
+    "Simetria Espelhada": 91.45762711864406,
+    "Ciclo das Dezenas": 91.6701251144793,
+    "Fibonacci Adaptativo": 31.525423728813568,
+    "Ressonância Harmônica": 34.6551724137931,
+    "Entropia Controlada": 21.526713008376817,
+    "Gravitação Numérica": 66.10169491525424,
+    "Quantum Collapse": 75.25423728813557,
+    "Memória Fractal": 34.74576271186441
+  },
+  "backtest": {
+    "avg_hits": 0.6,
+    "max_hits": 2,
+    "hit_distribution": {
+      "0": 56,
+      "1": 18,
+      "2": 1
+    },
+    "total_tests": 15
+  },
+  "feedback": {
+    "adjustment": "applied",
+    "boost_numbers": [],
+    "penalize_numbers": []
+  },
+  "anti_sycophancy": {
+    "approval": false,
+    "weaknesses": [
+      "jogos_muito_repetitivos"
+    ],
+    "suggestions": [
+      "Evitar jogos com muitos números repetidos para aumentar a probabilidade de ganhar."
+    ],
+    "quality_score": 10
+  },
+  "timestamp": "2026-04-19T08:52:11.237954"
+}

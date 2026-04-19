@@ -1,0 +1,167 @@
+{
+  "version": "v12.0",
+  "lottery": "Mega-Sena",
+  "games": [
+    [
+      6,
+      15,
+      28,
+      32,
+      56,
+      58
+    ],
+    [
+      6,
+      15,
+      28,
+      32,
+      47,
+      58
+    ],
+    [
+      6,
+      27,
+      32,
+      41,
+      56,
+      58
+    ],
+    [
+      6,
+      13,
+      28,
+      32,
+      41,
+      58
+    ],
+    [
+      9,
+      15,
+      28,
+      32,
+      47,
+      56
+    ],
+    [
+      6,
+      14,
+      28,
+      39,
+      41,
+      56
+    ],
+    [
+      4,
+      15,
+      28,
+      30,
+      41,
+      56
+    ],
+    [
+      6,
+      15,
+      28,
+      32,
+      38,
+      49
+    ],
+    [
+      6,
+      15,
+      32,
+      46,
+      47,
+      56
+    ],
+    [
+      6,
+      16,
+      28,
+      41,
+      53,
+      60
+    ]
+  ],
+  "analysis": {
+    "strategy": "SIAOL-PRO AGI v12.0",
+    "hot_numbers": [
+      6,
+      9,
+      10,
+      15,
+      37,
+      42,
+      49,
+      1,
+      46,
+      14
+    ],
+    "cold_numbers": [
+      34,
+      57,
+      55,
+      56,
+      16,
+      26,
+      41,
+      19,
+      28,
+      18
+    ],
+    "avoid_numbers": [
+      3,
+      27,
+      32,
+      53,
+      60
+    ],
+    "confidence": 0.8,
+    "dominant_thesis": "Quantum Collapse"
+  },
+  "thesis_scores": {
+    "DNA Numérico": 15.417757424577871,
+    "Vácuo Estatístico": 95,
+    "Simetria Espelhada": 93.41666666666666,
+    "Ciclo das Dezenas": 90.43476498467899,
+    "Fibonacci Adaptativo": 39.16666666666665,
+    "Ressonância Harmônica": 40.932203389830505,
+    "Entropia Controlada": 29.042467058365418,
+    "Gravitação Numérica": 70.0,
+    "Quantum Collapse": 81.66666666666666,
+    "Memória Fractal": 41.0
+  },
+  "backtest": {
+    "avg_hits": 1.2,
+    "max_hits": 2,
+    "hit_distribution": {
+      "0": 32,
+      "1": 37,
+      "2": 6
+    },
+    "total_tests": 15
+  },
+  "feedback": {
+    "adjustment": "applied",
+    "boost_numbers": [
+      58,
+      42,
+      32,
+      9,
+      27,
+      10
+    ],
+    "penalize_numbers": []
+  },
+  "anti_sycophancy": {
+    "approval": false,
+    "weaknesses": [
+      "faltam_números"
+    ],
+    "suggestions": [
+      "Incluir todos os números possíveis da Mega-Sena (6 em total)"
+    ],
+    "quality_score": 20
+  },
+  "timestamp": "2026-04-19T08:42:36.843031"
+}
