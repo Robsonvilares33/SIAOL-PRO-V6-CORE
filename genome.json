@@ -1,6 +1,6 @@
 {
-  "version": "9.0.11",
-  "generation": 60,
+  "version": "9.0.12",
+  "generation": 62,
   "weights": {
     "freq": 0.1236,
     "gap": 0.1396,
@@ -42,7 +42,7 @@
   ],
   "filter": {
     "sum_sigma": 0.8,
-    "even_sigma": 1.0,
+    "even_sigma": 0.959,
     "consec_sigma_low": 1.0,
     "consec_sigma_high": 1.5,
     "require_all_quadrants": true
@@ -102,6 +102,11 @@
       "gen": 60,
       "fitness": 11.0333,
       "timestamp": "2026-05-03T15:53:44.586194"
+    },
+    {
+      "gen": 62,
+      "fitness": 11.0,
+      "timestamp": "2026-05-05T16:28:31.894932"
     }
   ]
 }
