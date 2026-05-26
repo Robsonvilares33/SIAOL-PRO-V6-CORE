@@ -1,6 +1,6 @@
 {
-  "version": "9.0.26",
-  "generation": 129,
+  "version": "9.0.27",
+  "generation": 131,
   "weights": {
     "freq": 0.1099,
     "gap": 0.3076,
@@ -17,7 +17,7 @@
   "windows": [
     {
       "size": 5,
-      "weight": 8.0
+      "weight": 7.68
     },
     {
       "size": 10,
@@ -177,6 +177,11 @@
       "gen": 129,
       "fitness": 11.2333,
       "timestamp": "2026-05-24T16:04:36.432657"
+    },
+    {
+      "gen": 131,
+      "fitness": 11.2,
+      "timestamp": "2026-05-26T17:58:01.361794"
     }
   ]
 }
