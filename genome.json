@@ -1,14 +1,14 @@
 {
-  "version": "9.0.28",
-  "generation": 134,
+  "version": "9.0.29",
+  "generation": 137,
   "weights": {
-    "freq": 0.1099,
-    "gap": 0.3076,
-    "markov": 0.1231,
-    "window": 0.1273,
-    "cycle": 0.0104,
-    "trend": 0.1467,
-    "pair": 0.1751
+    "freq": 0.1028,
+    "gap": 0.3567,
+    "markov": 0.1151,
+    "window": 0.119,
+    "cycle": 0.0097,
+    "trend": 0.1372,
+    "pair": 0.1595
   },
   "sharp_exp": 2.96,
   "core_pct": 0.473,
@@ -43,7 +43,7 @@
   "filter": {
     "sum_sigma": 0.8,
     "even_sigma": 0.959,
-    "consec_sigma_low": 1.0,
+    "consec_sigma_low": 1.059,
     "consec_sigma_high": 1.5,
     "require_all_quadrants": true
   },
@@ -187,6 +187,11 @@
       "gen": 134,
       "fitness": 11.1333,
       "timestamp": "2026-05-27T17:58:28.078912"
+    },
+    {
+      "gen": 137,
+      "fitness": 11.1667,
+      "timestamp": "2026-05-28T18:15:37.549565"
     }
   ]
 }
