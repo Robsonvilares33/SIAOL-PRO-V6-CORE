@@ -1,14 +1,14 @@
 {
-  "version": "9.0.50",
-  "generation": 225,
+  "version": "9.0.51",
+  "generation": 230,
   "weights": {
-    "freq": 0.0766,
-    "gap": 0.2837,
-    "markov": 0.0097,
-    "window": 0.1253,
-    "cycle": 0.1334,
-    "trend": 0.2131,
-    "pair": 0.1582
+    "freq": 0.0804,
+    "gap": 0.2978,
+    "markov": 0.0102,
+    "window": 0.1315,
+    "cycle": 0.14,
+    "trend": 0.1793,
+    "pair": 0.1607
   },
   "sharp_exp": 2.65,
   "core_pct": 0.473,
@@ -297,6 +297,11 @@
       "gen": 220,
       "fitness": 11.0,
       "timestamp": "2026-06-25T17:14:45.649437"
+    },
+    {
+      "gen": 230,
+      "fitness": 10.6667,
+      "timestamp": "2026-06-27T16:09:28.949954"
     }
   ]
 }
