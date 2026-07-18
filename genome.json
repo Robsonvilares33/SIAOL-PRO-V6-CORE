@@ -1,6 +1,6 @@
 {
-  "version": "9.0.63",
-  "generation": 284,
+  "version": "9.0.64",
+  "generation": 288,
   "weights": {
     "freq": 0.1535,
     "gap": 0.24,
@@ -10,7 +10,7 @@
     "trend": 0.2017,
     "pair": 0.0769
   },
-  "sharp_exp": 2.8,
+  "sharp_exp": 2.41,
   "core_pct": 0.607,
   "pool_mult": 1.3,
   "pair_boost_factor": 0.76,
@@ -362,6 +362,11 @@
       "gen": 284,
       "fitness": 11.3,
       "timestamp": "2026-07-17T16:18:54.839502"
+    },
+    {
+      "gen": 288,
+      "fitness": 11.1,
+      "timestamp": "2026-07-18T16:01:22.703081"
     }
   ]
 }
