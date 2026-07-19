@@ -1,6 +1,6 @@
 {
-  "version": "9.0.64",
-  "generation": 288,
+  "version": "9.0.65",
+  "generation": 292,
   "weights": {
     "freq": 0.1535,
     "gap": 0.24,
@@ -33,7 +33,7 @@
     },
     {
       "size": 100,
-      "weight": 1.5
+      "weight": 2.56
     },
     {
       "size": 200,
@@ -43,7 +43,7 @@
   "filter": {
     "sum_sigma": 0.679,
     "even_sigma": 0.959,
-    "consec_sigma_low": 1.059,
+    "consec_sigma_low": 0.9,
     "consec_sigma_high": 1.281,
     "require_all_quadrants": true
   },
@@ -367,6 +367,11 @@
       "gen": 288,
       "fitness": 11.1,
       "timestamp": "2026-07-18T16:01:22.703081"
+    },
+    {
+      "gen": 292,
+      "fitness": 11.2333,
+      "timestamp": "2026-07-19T16:01:14.397568"
     }
   ]
 }
