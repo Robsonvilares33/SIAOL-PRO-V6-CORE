@@ -1,6 +1,6 @@
 {
-  "version": "9.0.67",
-  "generation": 302,
+  "version": "9.0.68",
+  "generation": 305,
   "weights": {
     "freq": 0.1495,
     "gap": 0.2033,
@@ -41,7 +41,7 @@
     }
   ],
   "filter": {
-    "sum_sigma": 0.679,
+    "sum_sigma": 0.48,
     "even_sigma": 0.959,
     "consec_sigma_low": 0.9,
     "consec_sigma_high": 1.281,
@@ -382,6 +382,11 @@
       "gen": 302,
       "fitness": 11.3333,
       "timestamp": "2026-07-23T16:40:01.850410"
+    },
+    {
+      "gen": 305,
+      "fitness": 11.2,
+      "timestamp": "2026-07-24T16:45:48.764003"
     }
   ]
 }
