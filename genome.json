@@ -1,6 +1,6 @@
 {
-  "version": "9.0.81",
-  "generation": 349,
+  "version": "9.0.82",
+  "generation": 353,
   "weights": {
     "freq": 0.2527,
     "gap": 0.2941,
@@ -13,7 +13,7 @@
   "sharp_exp": 2.15,
   "core_pct": 0.623,
   "pool_mult": 1.3,
-  "pair_boost_factor": 0.956,
+  "pair_boost_factor": 0.903,
   "windows": [
     {
       "size": 5,
@@ -452,6 +452,11 @@
       "gen": 349,
       "fitness": 11.1667,
       "timestamp": "2026-08-11T16:03:44.610841"
+    },
+    {
+      "gen": 353,
+      "fitness": 11.1333,
+      "timestamp": "2026-08-12T16:01:59.972924"
     }
   ]
 }
