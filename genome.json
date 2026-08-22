@@ -1,14 +1,14 @@
 {
-  "version": "9.0.90",
-  "generation": 373,
+  "version": "9.0.91",
+  "generation": 377,
   "weights": {
-    "freq": 0.2116,
-    "gap": 0.2631,
-    "markov": 0.0099,
-    "window": 0.2107,
-    "cycle": 0.2078,
-    "trend": 0.0767,
-    "pair": 0.0201
+    "freq": 0.1958,
+    "gap": 0.2726,
+    "markov": 0.0093,
+    "window": 0.195,
+    "cycle": 0.2377,
+    "trend": 0.071,
+    "pair": 0.0186
   },
   "sharp_exp": 2.15,
   "core_pct": 0.525,
@@ -43,8 +43,8 @@
   "filter": {
     "sum_sigma": 0.48,
     "even_sigma": 0.959,
-    "consec_sigma_low": 0.988,
-    "consec_sigma_high": 1.317,
+    "consec_sigma_low": 1.181,
+    "consec_sigma_high": 1.434,
     "require_all_quadrants": true
   },
   "fitness_history": [
@@ -497,6 +497,11 @@
       "gen": 373,
       "fitness": 11.1,
       "timestamp": "2026-08-21T15:38:04.923817"
+    },
+    {
+      "gen": 377,
+      "fitness": 11.2333,
+      "timestamp": "2026-08-22T15:25:37.468802"
     }
   ]
 }
