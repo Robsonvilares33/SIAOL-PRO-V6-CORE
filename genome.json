@@ -1,13 +1,13 @@
 {
-  "version": "9.0.103",
-  "generation": 423,
+  "version": "9.0.104",
+  "generation": 427,
   "weights": {
-    "freq": 0.1678,
-    "gap": 0.293,
+    "freq": 0.1668,
+    "gap": 0.2934,
     "markov": 0.01,
-    "window": 0.1625,
-    "cycle": 0.2036,
-    "trend": 0.1529,
+    "window": 0.1627,
+    "cycle": 0.2039,
+    "trend": 0.1531,
     "pair": 0.01
   },
   "sharp_exp": 2.15,
@@ -37,7 +37,7 @@
     },
     {
       "size": 200,
-      "weight": 1.08
+      "weight": 0.5
     }
   ],
   "filter": {
@@ -562,6 +562,11 @@
       "gen": 423,
       "fitness": 11.1,
       "timestamp": "2026-09-08T18:25:41.587707"
+    },
+    {
+      "gen": 427,
+      "fitness": 11.2667,
+      "timestamp": "2026-09-09T18:24:23.246173"
     }
   ]
 }
