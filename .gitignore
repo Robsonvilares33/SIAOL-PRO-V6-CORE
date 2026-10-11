@@ -1,2 +1,7 @@
 # Ignorar credenciais
 .env
+
+# Cache local da Lotomaster (resultados públicos consultados)
+.lotomaster.sqlite3*
+__pycache__/
+*.py[cod]

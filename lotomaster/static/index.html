@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#153a2b">
+  <meta name="description" content="Resultados oficiais, estatísticas históricas, gerador e simulador de loterias brasileiras.">
+  <title>Lotomaster | Estatísticas e Resultados</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <a class="brand" href="/" aria-label="Lotomaster início">
+        <span class="brand-mark" aria-hidden="true">L</span>
+        <span><strong>LOTO<span>MASTER</span></strong><small>inteligência em loterias</small></span>
+      </a>
+      <div class="side-caption">MODALIDADES</div>
+      <nav id="game-nav" class="game-nav" aria-label="Modalidades"></nav>
+      <div class="side-caption side-caption-tools">FERRAMENTAS</div>
+      <nav class="section-nav" aria-label="Ferramentas">
+        <button class="nav-item active" data-page="overview"><span class="nav-icon">▦</span>Visão geral</button>
+        <button class="nav-item" data-page="generator"><span class="nav-icon">✦</span>Gerador de jogos</button>
+        <button class="nav-item" data-page="simulator"><span class="nav-icon">✓</span>Conferir jogos</button>
+        <button class="nav-item" data-page="results"><span class="nav-icon">◷</span>Resultados</button>
+        <button class="nav-item" data-page="statistics"><span class="nav-icon">▤</span>Tabelas e estatísticas</button>
+        <button class="nav-item" data-page="tools"><span class="nav-icon">⌘</span>Outras ferramentas</button>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="data-status"><i class="status-dot"></i><span>Fonte pública<br><b>CAIXA Econômica Federal</b></span></div>
+        <small>Estatísticas descritivas, sem promessa de premiação.</small>
+      </div>
+    </aside>
+
+    <div class="main-shell">
+      <header class="topbar">
+        <button class="menu-toggle" id="menu-toggle" aria-label="Abrir menu">☰</button>
+        <div class="breadcrumb"><span>LOTO MASTER</span><b>/</b><strong id="page-crumb">Visão geral</strong></div>
+        <div class="top-actions">
+          <label class="game-picker-label" for="game-picker">Modalidade</label>
+          <select id="game-picker" aria-label="Selecionar modalidade"></select>
+          <button class="icon-button" id="refresh-button" title="Atualizar dados" aria-label="Atualizar dados">↻</button>
+        </div>
+      </header>
+      <main id="main-content" class="content" tabindex="-1">
+        <div class="loading-block"><span class="spinner"></span>Carregando dados públicos...</div>
+      </main>
+      <footer class="app-footer">
+        <span>Lotomaster · dados de concursos consultados no Portal de Loterias da CAIXA</span>
+        <span>Histórico e frequência não alteram a probabilidade de sorteio.</span>
+      </footer>
+    </div>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>
