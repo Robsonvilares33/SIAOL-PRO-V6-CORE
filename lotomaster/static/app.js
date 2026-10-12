@@ -487,6 +487,7 @@ async function refreshLiveData(force) {
     if (state.lastContests[item.key]!==undefined && state.lastContests[item.key]!==current) changed=true;
     state.lastContests[item.key]=current;
   });
-  if (force || (changed && ['overview','results','statistics','assistant'].includes(page))) await render();
+  if (force || (changed && ['overview','results','statistics'].includes(page))) await render();
+  if (changed && page==='assistant' && !force && $('#ai-progress')) $('#ai-progress').textContent='Novo concurso detectado pela atualização automática. Reexecute a análise para incluir esse resultado.';
 }
 window.addEventListener('DOMContentLoaded',init);

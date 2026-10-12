@@ -217,6 +217,12 @@
   async function analyze(config, spec, stats, draws, completeness) {
     const trustedData = {
       game: spec.name,
+      application_context: {
+        frontend: 'Interface com resultados, histórico, tabelas descritivas, gerador uniforme e conferidor de jogos; a atualização de concursos recentes ocorre enquanto a página está aberta.',
+        backend: 'A API FastAPI do próprio site carrega resultados por páginas e calcula frequências, atrasos, somas, pares/trincas, áreas e demais estatísticas da modalidade.',
+        official_data_path: 'Interface → API do site → Cloudflare Worker de leitura → API pública oficial da CAIXA. O histórico usado nesta solicitação é limitado ao período e à completude indicados neste payload.',
+        generator_baseline: 'A geração normal permanece uniforme e independente da IA. A combinação sugerida pelo modelo é experimental, separada e não tem vantagem demonstrada.',
+      },
       analyzed_contests: draws.length,
       archive_range: {oldest:draws.at(-1)?.contest ?? null, newest:draws[0]?.contest ?? null},
       archive_complete: Boolean(completeness.complete),
