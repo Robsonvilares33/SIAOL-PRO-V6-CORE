@@ -26,6 +26,19 @@ class AllGameStatisticsTests(unittest.TestCase):
                 for stat in spec.get("extra_stats", []):
                     self.assertIn("data", result["tables"][stat[0]])
 
+    def test_lotomania_grid_and_neighbors_are_descriptive_counts(self):
+        result = analyze_draws("lotomania", [
+            {"game": "lotomania", "contest": 2, "numbers": [0, 1, 10, 99]},
+            {"game": "lotomania", "contest": 1, "numbers": [0, 1, 11]},
+        ])
+        grid = result["layout"]["number_grid"]
+        self.assertEqual(grid["grid"][0]["count"], 2)
+        self.assertEqual(grid["grid"][1]["count"], 2)
+        self.assertEqual(grid["grid"][10]["count"], 1)
+        self.assertEqual(grid["quadrant_occurrences"]["Q1"], 6)
+        self.assertIn({"numbers": [0, 1], "count": 2}, grid["neighbor_pairs"])
+        self.assertIn("não indicam tendência", grid["interpretation"])
+
 
 if __name__ == "__main__":
     unittest.main()

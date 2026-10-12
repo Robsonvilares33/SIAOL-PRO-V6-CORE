@@ -102,6 +102,8 @@ def analyze_draws(game: str, draws: list[dict]) -> dict:
     ]
 
     layout = _layout_distribution(spec, all_numbers)
+    if key == "lotomania":
+        layout["number_grid"] = _lotomania_grid_summary(all_numbers)
     special = _special_distribution(key, ordered_draws)
     latest = ordered_draws[0] if ordered_draws else None
     previous_repeats = len(set(all_numbers[0]) & set(all_numbers[1])) if len(all_numbers) > 1 else 0
@@ -141,6 +143,9 @@ def analyze_draws(game: str, draws: list[dict]) -> dict:
         "binary": {"title": "Tabela Binária", "data": {"latest_contest": latest.get("contest") if latest else None, "bitstring": _binary_string(pool, latest.get("numbers", []) if latest else [])}},
         "filters": {"title": "Tabela dos Filtros", "data": {"sum": sum_summary, "parity_distribution": parity_rows, "unique_draws": n_draws}},
     }
+    if key == "lotomania":
+        tables["heatmap"] = {"title": "Áreas e casas mais/menos observadas", "data": layout["number_grid"]}
+        tables["neighbors"] = {"title": "Casas vizinhas observadas juntas", "rows": layout["number_grid"]["neighbor_pairs"]}
     for stat in spec.get("extra_stats", []):
         stat_id, stat_label = stat
         if stat_id == "quadrants":
@@ -236,6 +241,45 @@ def _column_frequency(rows: list[list[int]]) -> list[dict]:
             digits.append({"digit": number, "count": counts[number], "draws_since_hit": gap})
         results.append({"column": index + 1, "digits": digits})
     return results
+
+
+def _lotomania_grid_summary(rows: list[list[int]]) -> dict:
+    """Descriptive 10x10 occurrence counts; never a predictor or probability score."""
+    cell_counts = Counter(number for draw in rows for number in set(draw))
+    adjacent_counts = Counter()
+    for draw in rows:
+        selected = set(draw)
+        for number in selected:
+            row, column = divmod(number, 10)
+            if column < 9 and number + 1 in selected:
+                adjacent_counts[(number, number + 1)] += 1
+            if row < 9 and number + 10 in selected:
+                adjacent_counts[(number, number + 10)] += 1
+    cells = [
+        {
+            "number": number,
+            "row": number // 10 + 1,
+            "column": number % 10 + 1,
+            "count": cell_counts[number],
+        }
+        for number in range(100)
+    ]
+    neighbor_pairs = [
+        {"numbers": list(pair), "count": count}
+        for pair, count in adjacent_counts.most_common(30)
+    ]
+    quadrant_counts = _quadrant_distribution(
+        {"minimum": 0, "maximum": 99}, rows
+    )["counts"]
+    return {
+        "grid": cells,
+        "most_observed_cells": sorted(cells, key=lambda cell: (-cell["count"], cell["number"]))[:10],
+        "least_observed_cells": sorted(cells, key=lambda cell: (cell["count"], cell["number"]))[:10],
+        "quadrant_occurrences": quadrant_counts,
+        "neighbor_pairs": neighbor_pairs,
+        "neighbor_definition": "Casas ortogonalmente adjacentes na grade 10×10 (horizontal/vertical), presentes no mesmo concurso.",
+        "interpretation": "Contagens retrospectivas do período analisado; não indicam tendência nem chance futura.",
+    }
 
 
 def _special_distribution(key: str, draws: list[dict]) -> dict:

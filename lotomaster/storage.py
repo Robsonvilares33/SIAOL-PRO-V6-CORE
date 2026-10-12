@@ -77,6 +77,19 @@ def list_draws(game: str, limit: int = 50) -> list[dict]:
     return [json.loads(row["payload"]) for row in rows]
 
 
+def list_draws_range(game: str, first_contest: int, last_contest: int) -> list[dict]:
+    """Return cached draws in an inclusive contest range, newest first."""
+    initialize()
+    low, high = sorted((int(first_contest), int(last_contest)))
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT payload FROM lottery_draws
+               WHERE game=? AND contest BETWEEN ? AND ? ORDER BY contest DESC""",
+            (game, low, high),
+        ).fetchall()
+    return [json.loads(row["payload"]) for row in rows]
+
+
 def latest_draw(game: str) -> dict | None:
     draws = list_draws(game, 1)
     return draws[0] if draws else None

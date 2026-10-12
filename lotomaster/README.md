@@ -13,6 +13,8 @@ Aplicação web local, independente dos serviços atuais do SIAOL, para reproduz
 - Calculadora combinatória de probabilidades.
 - Cache SQLite local para resultados consultados.
 - Assistente analítico explicável; Gemini opcional para resumir estatísticas descritivas.
+- Configuração no navegador para OpenAI Responses (incluindo GPT-6 Astra), Gemini, Anthropic e APIs compatíveis com OpenAI Chat Completions.
+- Leitura paginada de todo o histórico disponível da CAIXA, incluindo atraso por dezena, grade 10×10 e coocorrência das casas vizinhas da Lotomania.
 - Atualização automática da interface a cada cinco minutos e fallback do navegador para a API pública da CAIXA por um Worker de leitura.
 
 As estatísticas são descritivas, não preditivas. Frequências e atrasos não alteram a probabilidade de um sorteio futuro. A geração permanece aleatória e não pondera dezenas históricas. Não há probabilidades calibradas fora da amostra para dezenas individuais.
@@ -32,7 +34,9 @@ O primeiro acesso consulta a API pública da CAIXA. Concursos consultados ficam 
 
 O backend e o fallback do navegador consultam a API oficial `https://servicebus2.caixa.gov.br/portaldeloterias/api` por um Cloudflare Worker público, somente de leitura, limitado aos nove endpoints de modalidades suportados e com CORS restrito ao site e ao preview autorizado. O código do Worker está em `cloudflare/workers/lotomaster-caixa-proxy.js`. O endereço usado pelo backend pode ser substituído pela variável `LOTOMASTER_CAIXA_PROXY_URL`. A aplicação não coleta dados por scraping do MazuSoft. Em Vercel, o banco SQLite fica em armazenamento temporário e pode ser reinicializado entre execuções; resultados atuais continuam sendo consultados na CAIXA. A interface confere novos concursos a cada cinco minutos enquanto está aberta.
 
-Para habilitar o resumo generativo, configure `GEMINI_API_KEY` como variável secreta no ambiente de hospedagem. Sem essa variável, o assistente continua disponível como análise estatística local explicável. O Gemini não escolhe dezenas com base em frequências nem afirma prever sorteios; a geração de bilhetes continua uniformemente aleatória, sujeita apenas às regras e restrições solicitadas.
+O assistente do navegador permite que cada pessoa informe a própria chave e modelo. A chave fica em `sessionStorage` por padrão e só é enviada diretamente ao provedor selecionado após uma ação explícita; a opção de persistir neste dispositivo usa `localStorage` e não deve ser ativada em computador compartilhado. Nenhuma chave do proprietário é distribuída. APIs personalizadas precisam permitir chamadas cross-origin (CORS) do navegador e usar o protocolo escolhido.
+
+Ao pedir análise, o navegador pagina os resultados públicos oficiais da CAIXA até o concurso 1 e calcula as estatísticas localmente no backend; a pessoa escolhe expressamente se envia esses dados históricos ao provedor configurado. Concursos futuros ainda não existem: a interface acompanha novos resultados publicados pela CAIXA, sem tentar prevê-los. Uma sugestão opcional de combinação pela IA é marcada como experimental e não substitui o gerador uniforme nem tem vantagem probabilística demonstrada. Custos, retenção e uso dos dados dependem do provedor e da chave pessoal.
 
 O histórico é carregado sob demanda em janelas de até 300 concursos por modalidade. Para persistir e analisar todo o histórico oficial de forma compartilhada em uma hospedagem serverless, é necessário um armazenamento durável além do SQLite temporário.
 
@@ -41,6 +45,7 @@ O histórico é carregado sob demanda em janelas de até 300 concursos por modal
 - `GET /api/v1/lotteries`
 - `GET /api/v1/{modalidade}/latest`
 - `GET /api/v1/{modalidade}/results?limit=30`
+- `GET /api/v1/{modalidade}/history?limit=100&before=...`
 - `GET /api/v1/{modalidade}/statistics?limit=50&table=frequency`
 - `GET /api/v1/{modalidade}/assistant?limit=50`
 - `POST /api/v1/{modalidade}/statistics/from-draws`

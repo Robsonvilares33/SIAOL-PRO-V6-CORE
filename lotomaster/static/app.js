@@ -215,19 +215,109 @@ async function loadSelectedStat() {
 }
 async function renderAssistant() {
   const item=spec(); const version=renderVersion;
-  $('#main-content').innerHTML=`${pageHeader('Análise explicável · '+item.name,'Assistente analítico',`Resumo do histórico oficial, com seleção aleatória e limites científicos explícitos.`)}<div class="notice"><span>ⓘ</span><span>O assistente descreve dados observados; frequência e atraso não predizem concursos futuros. Não há probabilidades calibradas fora da amostra para dezenas individuais.</span></div><div class="card"><div class="card-head"><div><h2 class="card-title">Leitura do histórico</h2><div class="card-subtitle">Amostra inicial de até 50 concursos; os cálculos e odds teóricas ficam separados.</div></div><span id="assistant-status" class="pill">Analisando…</span></div><div id="assistant-content"><div class="loading-block"><span class="spinner"></span>Consultando resultados oficiais e calculando estatísticas...</div></div></div><div class="card" style="margin-top:16px"><div class="card-head"><div><h2 class="card-title">Gerar combinação aleatória</h2><div class="card-subtitle">A IA não favorece dezenas históricas; cada combinação legal mantém a chance teórica definida pelas regras.</div></div></div><div class="form-actions"><button class="button button-primary" data-action="assistant-generate">Montar uma combinação aleatória</button></div><div id="assistant-ticket"></div></div>`;
+  $('#main-content').innerHTML=`${pageHeader('Análise exploratória · '+item.name,'Assistente analítico',`Conecte sua API pessoal para analisar resultados públicos e, se quiser, gerar uma combinação experimental.`)}${window.LotoMasterAI.configMarkup()}<div class="notice notice-warning"><span>ⓘ</span><span>A análise é retrospectiva e não prevê resultados. Concursos futuros só podem ser lidos depois de publicados pela CAIXA; a página verifica atualizações enquanto permanece aberta. O gerador uniforme permanece inalterado.</span></div><form id="ai-analysis-form" class="card"><div class="card-head"><div><h2 class="card-title">Ler resultados oficiais e analisar</h2><div class="card-subtitle">O envio à API pessoal só ocorre depois do seu comando e consentimento.</div></div><span id="assistant-status" class="pill pill-muted">Aguardando</span></div><div class="ai-analysis-controls"><div class="field"><label for="ai-history-mode">Período histórico</label><select id="ai-history-mode"><option value="all" selected>Todo o histórico disponível (desde o concurso 1)</option><option value="300">Últimos 300 concursos</option><option value="50">Últimos 50 concursos</option></select></div><button class="button button-primary" type="submit">Analisar com minha IA</button></div><label class="ai-consent"><input id="ai-consent" type="checkbox"><span>Autorizo enviar ao provedor escolhido os resultados públicos da CAIXA e as estatísticas deste recorte para a análise solicitada.</span></label><label class="ai-partial"><input id="ai-allow-partial" type="checkbox"><span>Se alguns concursos estiverem indisponíveis, aceito uma análise parcial claramente identificada.</span></label><div class="small-note ai-progress" id="ai-progress">O histórico completo é carregado em páginas de até 100 concursos. O arquivo atualmente suporta até 5.000 concursos por análise.</div><div id="assistant-content"><div class="empty-state">Configure uma API, marque o consentimento e solicite uma análise.</div></div></form><div class="card" style="margin-top:16px"><div class="card-head"><div><h2 class="card-title">Gerador uniforme (baseline)</h2><div class="card-subtitle">Esta combinação é aleatória e independente da análise histórica; cada jogo legal conserva suas chances teóricas.</div></div></div><div class="form-actions"><button class="button button-primary" data-action="assistant-generate">Montar combinação aleatória</button></div><div id="assistant-ticket"></div></div>`;
+  if (version!==renderVersion || state.page!=='assistant') return;
+  window.LotoMasterAI.bindConfigControls();
+}
+
+async function fetchAssistantHistory(item, mode, progress) {
+  if (mode!=='all') {
+    const limit=Number(mode);
+    const page=await api(`/${item.key}/results?limit=${limit}`);
+    return {draws:page.items||[],missingCount:0,complete:false,expectedCount:page.count||0,periodLabel:`Recorte dos últimos ${page.count||limit} concursos`};
+  }
+  const byContest=new Map(); const missing=new Set(); let before=null; let pages=0; let hasMore=true;
+  while (hasMore && pages<50) {
+    const cursor=before===null?'':`&before=${encodeURIComponent(before)}`;
+    const page=await api(`/${item.key}/history?limit=100${cursor}`);
+    (page.items||[]).forEach(draw=>byContest.set(Number(draw.contest),draw));
+    (page.missing_contests||[]).forEach(contest=>missing.add(Number(contest)));
+    pages++;
+    const available=byContest.size;
+    progress.textContent=`Carregando histórico da CAIXA: ${available} concursos recebidos · página ${pages}${missing.size?` · ${missing.size} indisponível(is)`:''}`;
+    hasMore=page.next_before!==null && page.next_before!==undefined;
+    if (hasMore) {
+      const next=Number(page.next_before);
+      if (!Number.isInteger(next)||next<1||next===before) throw new Error('O cursor do histórico retornou um valor inválido.');
+      before=next;
+    }
+  }
+  if (hasMore) throw new Error('O histórico excede o limite de 5.000 concursos desta análise. Selecione um recorte menor.');
+  const draws=[...byContest.values()].sort((a,b)=>Number(b.contest)-Number(a.contest));
+  return {draws,missingCount:missing.size,complete:missing.size===0,expectedCount:draws.length+missing.size,periodLabel:'Histórico completo disponível'};
+}
+
+function renderAssistantAnalysis(result, item, draws, completeness, stats) {
+  const content=$('#assistant-content');
+  const observations=(result.observations||[]).map(text=>`<li>${esc(text)}</li>`).join('');
+  const candidate=result.candidate_numbers;
+  const candidateHtml=candidate?`<div class="ai-ticket"><div class="generated-ticket-head"><b>Sugestão experimental da IA · ${esc(item.name)}</b><span class="pill pill-warm">Sem vantagem demonstrada</span></div><div class="ball-row">${balls(candidate,false,item.digits)}</div><div class="small-note">${esc(result.candidate_note||'Combinação exploratória, não é previsão nem altera a probabilidade teórica.')} ${item.bonus?.type==='team'?'Escolha também o Time do Coração na conferência.':item.bonus?.type==='month'?'Escolha também o Mês da Sorte na conferência.':item.bonus?.type==='trevos'?'Escolha também os trevos na conferência.':''}</div><div class="form-actions"><button type="button" class="button" data-action="ai-use-candidate" data-numbers="${esc(JSON.stringify(candidate))}">Conferir esta sugestão</button></div></div>`:'<div class="small-note">A resposta não forneceu uma combinação válida conforme as regras oficiais; nenhuma combinação foi exibida.</div>';
+  const scope=completeness.complete?completeness.periodLabel:`análise parcial · ${completeness.missingCount} concurso(s) indisponível(is)`;
+  content.innerHTML=`<div class="stats-highlight"><div class="mini-stat"><small>Concursos recebidos</small><b>${esc(draws.length.toLocaleString('pt-BR'))}</b></div><div class="mini-stat"><small>Mais recente</small><b>${esc(stats.latest_contest||'—')}</b></div><div class="mini-stat"><small>Escopo</small><b>${esc(scope)}</b></div></div><h3 class="card-title">Leitura da IA</h3><p class="ai-output">${esc(result.analysis||'O provedor não apresentou um resumo interpretável.')}</p>${observations?`<h3 class="card-title" style="margin-top:14px">Observações do modelo</h3><ul class="ai-observations">${observations}</ul>`:''}${candidateHtml}<div class="notice"><span>ⓘ</span><span>Frequência, atraso, vizinhança e áreas quentes/frias são descrições do histórico, não probabilidades ou previsões. Mesmo uma anomalia aparente não demonstra manipulação nem vantagem futura. ${esc(stats.disclaimer||'')}</span></div>`;
+}
+
+async function runPersonalAIAnalysis(event) {
+  event.preventDefault();
+  const config=window.LotoMasterAI.getConfig();
+  const item=spec(); const version=renderVersion;
+  const status=$('#assistant-status'); const output=$('#assistant-content'); const progress=$('#ai-progress');
+  if (!config?.key) { output.innerHTML=errorBlock('Salve primeiro sua própria configuração de API.'); return; }
+  if (!$('#ai-consent')?.checked) { output.innerHTML=errorBlock('Marque o consentimento para enviar os resultados públicos ao provedor escolhido.'); return; }
+  const mode=$('#ai-history-mode').value;
+  const allowPartial=$('#ai-allow-partial').checked;
+  const submit=event.submitter;
+  if (submit) submit.disabled=true;
+  status.textContent='Carregando';
+  output.innerHTML='<div class="loading-block"><span class="spinner"></span>Buscando resultados oficiais da CAIXA...</div>';
   try {
-    const data=await api(`/${item.key}/assistant?limit=50`);
+    const completeness=await fetchAssistantHistory(item,mode,progress);
     if (version!==renderVersion || state.page!=='assistant' || state.game!==item.key) return;
-    $('#assistant-status').textContent=data.ai?.status==='available'?`Gemini · ${data.ai.model}`:'Análise explicável local';
-    const top=(data.historical_summary?.most_frequent||[]).slice(0,5).map(row=>`${padNum(row.number,item.digits)} (${row.count})`).join(' · ')||'—';
-    const low=(data.historical_summary?.least_frequent||[]).slice(0,5).map(row=>`${padNum(row.number,item.digits)} (${row.count})`).join(' · ')||'—';
-    $('#assistant-content').innerHTML=`<div class="stats-highlight"><div class="mini-stat"><small>Concursos analisados</small><b>${esc(data.draws_analyzed)}</b></div><div class="mini-stat"><small>Concurso mais recente</small><b>${esc(data.latest_contest||'—')}</b></div><div class="mini-stat"><small>Maiores contagens observadas</small><b>${esc(top)}</b></div><div class="mini-stat"><small>Menores contagens observadas</small><b>${esc(low)}</b></div></div><p>${esc(data.commentary)}</p><div class="notice"><span>ⓘ</span><span>${esc(data.disclaimer)}</span></div>`;
+    if (!completeness.draws.length) throw new Error('Não há concursos disponíveis para esta análise.');
+    if (!completeness.complete && mode==='all' && !allowPartial) throw new Error(`Não foi possível obter ${completeness.missingCount} concurso(s). Marque a opção de análise parcial se desejar continuar; a IA não será chamada sem essa escolha.`);
+    status.textContent='Calculando';
+    progress.textContent=`Calculando estatísticas descritivas de ${completeness.draws.length.toLocaleString('pt-BR')} concursos; a seguir os dados serão enviados ao provedor selecionado.`;
+    const stats=await api(`/${item.key}/statistics/from-draws`,{method:'POST',body:JSON.stringify({draws:completeness.draws})});
+    if (version!==renderVersion || state.page!=='assistant' || state.game!==item.key) return;
+    status.textContent=`${config.model}`;
+    progress.textContent=`Enviando diretamente a ${config.model} em ${config.provider}; nenhum segredo passa pelo backend do site.`;
+    const result=await window.LotoMasterAI.analyze(config,item,stats,completeness.draws,completeness);
+    if (version!==renderVersion || state.page!=='assistant' || state.game!==item.key) return;
+    renderAssistantAnalysis(result,item,completeness.draws,completeness,stats);
+    status.textContent='Concluída';
+    progress.textContent=`Fonte: resultados oficiais da CAIXA. ${completeness.draws.length.toLocaleString('pt-BR')} concursos enviados; janela ${completeness.draws.at(-1)?.contest||'—'}–${completeness.draws[0]?.contest||'—'}.`;
   } catch(error) {
     if (version!==renderVersion) return;
-    $('#assistant-status').textContent='Sem conexão';
-    $('#assistant-content').innerHTML=errorBlock(error.message);
+    status.textContent='Não concluída';
+    output.innerHTML=errorBlock(error.message);
+  } finally {
+    if (submit && submit.isConnected) submit.disabled=false;
   }
+}
+
+function savePersonalAIConfig() {
+  try {
+    const config=window.LotoMasterAI.saveFromForm();
+    $('#ai-config-status').textContent=`Configurada · ${config.model}`;
+    $('#ai-config-status').classList.remove('pill-muted');
+    $('#ai-key').value='';
+    toast(config.persistent?'Configuração guardada neste dispositivo':'Configuração guardada nesta aba');
+  } catch(error) { toast(error.message); }
+}
+
+async function testPersonalAIConfig() {
+  const button=$('[data-action="ai-test"]');
+  try {
+    const config=window.LotoMasterAI.saveFromForm();
+    if (button) button.disabled=true;
+    const status=$('#ai-config-status'); status.textContent='Testando';
+    await window.LotoMasterAI.testConnection(config);
+    status.textContent=`Conectada · ${config.model}`; status.classList.remove('pill-muted');
+    toast('Conexão da API confirmada; nenhum histórico foi enviado');
+    $('#ai-key').value='';
+  } catch(error) {
+    const status=$('#ai-config-status'); if(status) status.textContent='Falha na conexão';
+    toast(error.message);
+  } finally { if(button) button.disabled=false; }
 }
 async function generateAssistantTicket() {
   const item=spec(); const target=$('#assistant-ticket');
@@ -319,6 +409,17 @@ function handleClick(event) {
   const modeButton=event.target.closest('[data-mode]');
   const numberButton=event.target.closest('.number-cell');
   const columnButton=event.target.closest('[data-column][data-digit]');
+  const aiButton=event.target.closest('[data-action]');
+  if (aiButton?.dataset.action==='ai-test') { testPersonalAIConfig(); return; }
+  if (aiButton?.dataset.action==='ai-clear') { window.LotoMasterAI.clearConfig(); toast('Chave removida deste navegador'); render(); return; }
+  if (aiButton?.dataset.action==='ai-use-candidate') {
+    try {
+      const item=spec(); const numbers=JSON.parse(aiButton.dataset.numbers);
+      state.simulatorText=numbers.map(n=>padNum(n,item.digits)).join(' ');
+      state.simulatorTickets=[]; state.simulatorBonus={}; state.page='simulator'; render();
+    } catch(_) { toast('Não foi possível abrir essa combinação.'); }
+    return;
+  }
   if (pageButton) { state.page=pageButton.dataset.page; if (gameButton) { state.game=gameButton.dataset.game; state.generated=[]; state.simulatorTickets=[]; state.simulatorText=''; state.simulatorBonus={}; } $('#sidebar').classList.remove('open'); render(); return; }
   if (gameButton) { state.game=gameButton.dataset.game; state.page='overview'; state.generated=[]; state.simulatorTickets=[]; state.simulatorText=''; state.simulatorBonus={}; render(); return; }
   if (modeButton) { state.mode=modeButton.dataset.mode; $$('.pick-mode button').forEach(btn=>btn.classList.toggle('active',btn===modeButton)); return; }
@@ -349,6 +450,8 @@ function handleClick(event) {
   }
 }
 async function handleSubmit(event) {
+  if (event.target.id==='ai-config-form') { event.preventDefault(); savePersonalAIConfig(); return; }
+  if (event.target.id==='ai-analysis-form') return runPersonalAIAnalysis(event);
   if (event.target.id==='generate-form') return handleGenerate(event);
   if (event.target.id==='simulate-form') return handleSimulate(event);
 }

@@ -64,6 +64,46 @@ def list_results(game: str, limit: int = 20, refresh_latest: bool = True) -> lis
     return results or ([latest] if latest else [])
 
 
+def list_history_page(game: str, limit: int = 100, before: int | None = None) -> dict:
+    """Load one bounded CAIXA history page; ``before`` is an exclusive cursor."""
+    spec = get_spec(game)
+    key = spec["key"]
+    limit = max(1, min(int(limit), 100))
+    if before is not None and int(before) <= 1:
+        return {"items": [], "expected_count": 0, "missing_contests": [], "next_before": None}
+
+    latest = latest_result(key, refresh=True)
+    latest_contest = int(latest["contest"])
+    upper = min(latest_contest, int(before) - 1) if before is not None else latest_contest
+    lower = max(1, upper - limit + 1)
+    if upper < lower:
+        return {"items": [], "expected_count": 0, "missing_contests": [], "next_before": None}
+
+    cached = storage.list_draws_range(key, lower, upper)
+    have = {int(draw["contest"]) for draw in cached}
+    missing = [contest for contest in range(upper, lower - 1, -1) if contest not in have]
+    if missing:
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = {pool.submit(fetch_draw, key, contest): contest for contest in missing}
+            for future in as_completed(futures):
+                try:
+                    storage.save_draw(future.result())
+                except Exception:
+                    continue
+
+    items = storage.list_draws_range(key, lower, upper)
+    returned = {int(draw["contest"]) for draw in items}
+    missing_after_fetch = [contest for contest in range(upper, lower - 1, -1) if contest not in returned]
+    return {
+        "items": items,
+        "from_contest": lower,
+        "to_contest": upper,
+        "expected_count": upper - lower + 1,
+        "missing_contests": missing_after_fetch,
+        "next_before": lower if lower > 1 else None,
+    }
+
+
 def generate_tickets(game: str, options: dict | None = None) -> list[dict]:
     spec = get_spec(game)
     options = options or {}

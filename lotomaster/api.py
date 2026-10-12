@@ -13,7 +13,7 @@ from .analytics import analyze_draws
 from .assistant import build_assistant_report
 from .caixa import BASE_URL, fetch_draw
 from .catalog import get_spec, public_catalog, public_spec
-from .engine import generate_tickets, latest_result, list_results, simulate_tickets, ticket_probability
+from .engine import generate_tickets, latest_result, list_history_page, list_results, simulate_tickets, ticket_probability
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
@@ -101,12 +101,29 @@ def game_results(game: str, limit: int = Query(default=20, ge=1, le=300)):
         raise HTTPException(status_code=502, detail=str(exc))
 
 
+@app.get("/api/v1/{game}/history")
+def game_history(
+    game: str,
+    limit: int = Query(default=100, ge=1, le=100),
+    before: int | None = Query(default=None, ge=1),
+):
+    """Paginated full CAIXA archive; ``before`` is an exclusive contest cursor."""
+    try:
+        spec = get_spec(game)
+        page = list_history_page(spec["key"], limit=limit, before=before)
+        return {"game": spec["key"], "name": spec["name"], "source": "CAIXA via Cloudflare Worker", **page}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Modalidade não encontrada.")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
 @app.post("/api/v1/{game}/statistics/from-draws")
 def game_statistics_from_draws(game: str, request: AnalyzeDrawsRequest):
     try:
         spec = get_spec(game)
-        if not request.draws or len(request.draws) > 300:
-            raise HTTPException(status_code=422, detail="Informe de 1 a 300 concursos para análise.")
+        if not request.draws or len(request.draws) > 5000:
+            raise HTTPException(status_code=422, detail="Informe de 1 a 5.000 concursos para análise.")
         if any(draw.get("game") != spec["key"] for draw in request.draws):
             raise HTTPException(status_code=422, detail="Todos os concursos precisam ser da mesma modalidade.")
         return analyze_draws(spec["key"], request.draws)

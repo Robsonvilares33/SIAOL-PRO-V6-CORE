@@ -23,6 +23,14 @@ class LotomasterApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["count"], 9)
 
+    def test_ai_configuration_asset_is_served_with_application(self):
+        page = self.client.get("/")
+        module = self.client.get("/assets/ai-assistant.js")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("ai-assistant.js", page.text)
+        self.assertEqual(module.status_code, 200)
+        self.assertIn("gpt-6-astra", module.text)
+
     def test_fetch_draw_uses_cloudflare_proxy_and_checks_requested_contest(self):
         response = Mock()
         response.json.return_value = {
@@ -73,6 +81,22 @@ class LotomasterApiTests(unittest.TestCase):
         self.assertEqual(computed.json()["latest_contest"], 50)
         wrong_game = self.client.post("/api/v1/quina/statistics/from-draws", json={"draws": draws})
         self.assertEqual(wrong_game.status_code, 422)
+
+    def test_history_cursor_endpoint_returns_caixa_page_metadata(self):
+        page = {
+            "items": [{"game": "lotomania", "contest": 100, "numbers": list(range(20))}],
+            "from_contest": 100,
+            "to_contest": 100,
+            "expected_count": 1,
+            "missing_contests": [],
+            "next_before": 100,
+        }
+        with patch("lotomaster.api.list_history_page", return_value=page) as load:
+            response = self.client.get("/api/v1/lotomania/history?limit=1&before=101")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["source"], "CAIXA via Cloudflare Worker")
+        self.assertEqual(response.json()["next_before"], 100)
+        load.assert_called_once_with("lotomania", limit=1, before=101)
 
     def test_day_of_fortune_generate_rejects_month_thirteen(self):
         response = self.client.post("/api/v1/diadesorte/generate", json={"bonus": {"month": 13}})
