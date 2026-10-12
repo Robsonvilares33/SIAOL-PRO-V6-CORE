@@ -74,7 +74,7 @@
     try {
       const response = await fetch(`${CAIXA}/${item.endpoint}${suffix}`, {
         method: 'GET', mode: 'cors', credentials: 'omit', cache: 'no-store',
-        headers: { Accept: 'application/json, text/plain, */*' }, signal: controller.signal,
+        signal: controller.signal,
       });
       if (!response.ok) throw new Error(`API pública da CAIXA respondeu HTTP ${response.status}.`);
       const raw = await response.json();
