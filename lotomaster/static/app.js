@@ -40,7 +40,7 @@ async function api(path, options={}) {
         const recovered=await window.lotomasterCaixaFallback(path);
         if (recovered!==undefined) return recovered;
       } catch(fallbackError) {
-        throw new Error(`${error.message} · Consulta direta da CAIXA também falhou: ${fallbackError.message}`);
+        throw new Error(`${error.message} · Consulta da CAIXA via Worker também falhou: ${fallbackError.message}`);
       }
     }
     throw error;
@@ -118,9 +118,9 @@ async function renderOverview(version=renderVersion) {
   const failed = rows.filter(row=>row.error);
   $('#main-content').innerHTML = `${pageHeader('Painel de concursos','Resultados e estatísticas','Consulte os últimos concursos oficiais e abra as ferramentas disponíveis para cada modalidade.',`<button class="button button-primary" data-page="generator">✦ Gerar jogos</button>`)}
     <div class="grid grid-2" style="margin-bottom:16px">${active?.data?resultCard(active.data,active.item):`<div class="card">${errorBlock(active?.error?.message||'Resultado indisponível.')}</div>`}
-      <div class="grid" style="align-content:start"><div class="grid grid-2"><div class="card kpi"><div class="kpi-top"><span>Modalidades disponíveis</span><span class="kpi-icon">▦</span></div><div class="kpi-value">${state.catalog.length}</div><div class="kpi-foot">Loterias oficiais da CAIXA</div></div><div class="card kpi"><div class="kpi-top"><span>Fonte de resultados</span><span class="kpi-icon">↻</span></div><div class="kpi-value" style="font-size:16px">CAIXA</div><div class="kpi-foot">Consulta pública e cache local</div></div></div>
+      <div class="grid" style="align-content:start"><div class="grid grid-2"><div class="card kpi"><div class="kpi-top"><span>Modalidades disponíveis</span><span class="kpi-icon">▦</span></div><div class="kpi-value">${state.catalog.length}</div><div class="kpi-foot">Loterias oficiais da CAIXA</div></div><div class="card kpi"><div class="kpi-top"><span>Fonte de resultados</span><span class="kpi-icon">↻</span></div><div class="kpi-value" style="font-size:16px">CAIXA</div><div class="kpi-foot">API oficial via Worker; cache local</div></div></div>
       <div class="card"><div class="card-head"><div><h2 class="card-title">Atalhos da modalidade</h2><div class="card-subtitle">Ferramentas correspondentes às páginas públicas da referência</div></div></div><div class="form-actions"><button class="button" data-page="generator">Gerador</button><button class="button" data-page="simulator">Conferir jogos</button><button class="button" data-page="results">Resultados</button><button class="button" data-page="statistics">Estatísticas</button></div></div></div>
-    </div><div class="card"><div class="card-head"><div><h2 class="card-title">Resultados recentes por modalidade</h2><div class="card-subtitle">Atualizados diretamente da API pública da CAIXA</div></div><span class="pill">${successful.length} de ${state.catalog.length} disponíveis</span></div><div class="grid grid-3">${cards||'<div class="empty-state">Nenhum resultado retornado.</div>'}</div>${failed.length?`<div class="small-note" style="margin-top:12px">Temporariamente indisponíveis: ${failed.map(row=>esc(row.item.name)).join(', ')}.</div>`:''}</div>
+    </div><div class="card"><div class="card-head"><div><h2 class="card-title">Resultados recentes por modalidade</h2><div class="card-subtitle">API pública da CAIXA via Worker de leitura</div></div><span class="pill">${successful.length} de ${state.catalog.length} disponíveis</span></div><div class="grid grid-3">${cards||'<div class="empty-state">Nenhum resultado retornado.</div>'}</div>${failed.length?`<div class="small-note" style="margin-top:12px">Temporariamente indisponíveis: ${failed.map(row=>esc(row.item.name)).join(', ')}.</div>`:''}</div>
     <div class="notice"><span>ⓘ</span><span><strong>Como interpretar:</strong> frequência, atraso e padrões são descrições de sorteios passados. Cada novo concurso é aleatório e independente; essas métricas não aumentam a probabilidade de um jogo ser sorteado.</span></div>`;
 }
 

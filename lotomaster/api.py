@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from . import storage
 from .analytics import analyze_draws
 from .assistant import build_assistant_report
-from .caixa import fetch_draw
+from .caixa import BASE_URL, fetch_draw
 from .catalog import get_spec, public_catalog, public_spec
 from .engine import generate_tickets, latest_result, list_results, simulate_tickets, ticket_probability
 
@@ -62,7 +62,15 @@ def startup():
 
 @app.get("/api/v1/health")
 def health():
-    return {"status": "ok", "app": "Lotomaster", "version": app.version, "official_results_source": "API pública da CAIXA"}
+    return {
+        "status": "ok",
+        "app": "Lotomaster",
+        "version": app.version,
+        "official_results_source": "API pública da CAIXA",
+        "official_results_transport": "Cloudflare Worker (proxy somente leitura)",
+        "caixa_proxy_url": BASE_URL,
+        "frontend_auto_refresh_minutes": 5,
+    }
 
 
 @app.get("/api/v1/lotteries")

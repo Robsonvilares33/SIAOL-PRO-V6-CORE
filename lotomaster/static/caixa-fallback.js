@@ -1,6 +1,6 @@
-/* Recuperação somente leitura: consulta a API pública da CAIXA no navegador e mantém cache local. */
+/* Recuperação somente leitura: consulta a API pública da CAIXA via Worker e mantém cache local. */
 (() => {
-  const CAIXA = 'https://servicebus2.caixa.gov.br/portaldeloterias/api';
+  const CAIXA = 'https://lotomaster-caixa-proxy-test.robsonboiling.workers.dev';
   const GAMES = {
     megasena: { key: 'megasena', name: 'Mega-Sena', endpoint: 'megasena' },
     lotofacil: { key: 'lotofacil', name: 'Lotofácil', endpoint: 'lotofacil' },
@@ -16,7 +16,7 @@
     janeiro: 1, fevereiro: 2, marco: 3, 'março': 3, abril: 4, maio: 5, junho: 6,
     julho: 7, agosto: 8, setembro: 9, outubro: 10, novembro: 11, dezembro: 12,
   };
-  const SOURCE = 'CAIXA — consulta direta pelo navegador';
+  const SOURCE = 'CAIXA — API oficial via Cloudflare Worker';
   const REQUEST_TIMEOUT_MS = 20000;
   const HISTORY_BUDGET_MS = 15000;
 

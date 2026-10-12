@@ -1,10 +1,10 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 
 from lotomaster.api import app
-from lotomaster.caixa import normalize_draw
+from lotomaster.caixa import BASE_URL, fetch_draw, normalize_draw
 
 
 class LotomasterApiTests(unittest.TestCase):
@@ -16,9 +16,27 @@ class LotomasterApiTests(unittest.TestCase):
         health = self.client.get("/api/v1/health")
         self.assertEqual(health.status_code, 200)
         self.assertEqual(health.json()["official_results_source"], "API pública da CAIXA")
+        self.assertEqual(health.json()["official_results_transport"], "Cloudflare Worker (proxy somente leitura)")
+        self.assertEqual(health.json()["caixa_proxy_url"], BASE_URL)
+        self.assertEqual(health.json()["frontend_auto_refresh_minutes"], 5)
         response = self.client.get("/api/v1/lotteries")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["count"], 9)
+
+    def test_fetch_draw_uses_cloudflare_proxy_and_checks_requested_contest(self):
+        response = Mock()
+        response.json.return_value = {
+            "numero": 3801,
+            "dataApuracao": "09/10/2026",
+            "listaDezenas": [str(number) for number in range(1, 16)],
+        }
+        with patch("lotomaster.caixa.requests.get", return_value=response) as get:
+            draw = fetch_draw("lotofacil", 3801)
+        self.assertEqual(get.call_args.args[0], f"{BASE_URL}/lotofacil/3801")
+        self.assertNotIn("Origin", get.call_args.kwargs["headers"])
+        self.assertEqual(get.call_args.kwargs["timeout"], 18)
+        response.raise_for_status.assert_called_once()
+        self.assertEqual(draw["contest"], 3801)
 
     def test_generate_and_simulate(self):
         generated = self.client.post("/api/v1/lotofacil/generate", json={"count": 2, "seed": 20})

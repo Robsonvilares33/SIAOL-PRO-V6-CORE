@@ -13,7 +13,7 @@ Aplicação web local, independente dos serviços atuais do SIAOL, para reproduz
 - Calculadora combinatória de probabilidades.
 - Cache SQLite local para resultados consultados.
 - Assistente analítico explicável; Gemini opcional para resumir estatísticas descritivas.
-- Atualização automática da interface a cada cinco minutos e fallback do navegador diretamente para a API pública da CAIXA quando a hospedagem bloquear a consulta do backend.
+- Atualização automática da interface a cada cinco minutos e fallback do navegador para a API pública da CAIXA por um Worker de leitura.
 
 As estatísticas são descritivas, não preditivas. Frequências e atrasos não alteram a probabilidade de um sorteio futuro. A geração permanece aleatória e não pondera dezenas históricas. Não há probabilidades calibradas fora da amostra para dezenas individuais.
 
@@ -30,7 +30,7 @@ Abra `http://localhost:8020`. A documentação OpenAPI fica em `http://localhost
 
 O primeiro acesso consulta a API pública da CAIXA. Concursos consultados ficam no arquivo `.lotomaster.sqlite3` na raiz do projeto, ignorado pelo Git. Para alterar o local do banco, defina `LOTOMASTER_DB_PATH`.
 
-O backend consulta diretamente `https://servicebus2.caixa.gov.br/portaldeloterias/api`; o navegador também pode consultar essa mesma API oficial como fallback. A aplicação não coleta dados por scraping do MazuSoft. Em Vercel, o banco SQLite fica em armazenamento temporário e pode ser reinicializado entre execuções; resultados atuais continuam sendo consultados na CAIXA. A interface atualiza a cada cinco minutos enquanto está aberta.
+O backend e o fallback do navegador consultam a API oficial `https://servicebus2.caixa.gov.br/portaldeloterias/api` por um Cloudflare Worker público, somente de leitura, limitado aos nove endpoints de modalidades suportados e com CORS restrito ao site e ao preview autorizado. O código do Worker está em `cloudflare/workers/lotomaster-caixa-proxy.js`. O endereço usado pelo backend pode ser substituído pela variável `LOTOMASTER_CAIXA_PROXY_URL`. A aplicação não coleta dados por scraping do MazuSoft. Em Vercel, o banco SQLite fica em armazenamento temporário e pode ser reinicializado entre execuções; resultados atuais continuam sendo consultados na CAIXA. A interface confere novos concursos a cada cinco minutos enquanto está aberta.
 
 Para habilitar o resumo generativo, configure `GEMINI_API_KEY` como variável secreta no ambiente de hospedagem. Sem essa variável, o assistente continua disponível como análise estatística local explicável. O Gemini não escolhe dezenas com base em frequências nem afirma prever sorteios; a geração de bilhetes continua uniformemente aleatória, sujeita apenas às regras e restrições solicitadas.
 

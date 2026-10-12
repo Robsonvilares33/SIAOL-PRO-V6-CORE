@@ -28,7 +28,7 @@ def latest_result(game: str, refresh: bool = True) -> dict:
         draw = fetch_draw(key)
         storage.save_draw(draw)
         _latest_cache[key] = (now, draw)
-        return {**draw, "source": "CAIXA"}
+        return {**draw, "source": "CAIXA via Cloudflare Worker"}
     except Exception as exc:
         if cached_db:
             _latest_cache[key] = (now, cached_db)

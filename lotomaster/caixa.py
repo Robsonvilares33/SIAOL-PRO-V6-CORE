@@ -1,15 +1,17 @@
 """Cliente somente leitura da API pública do Portal de Loterias da CAIXA."""
 from datetime import datetime, timezone
+import os
 import requests
 
 from .catalog import get_spec
 
-BASE_URL = "https://servicebus2.caixa.gov.br/portaldeloterias/api"
+BASE_URL = os.getenv(
+    "LOTOMASTER_CAIXA_PROXY_URL",
+    "https://lotomaster-caixa-proxy-test.robsonboiling.workers.dev",
+).rstrip("/")
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; Lotomaster/1.1; consulta de resultados publicos)",
-    "Accept": "application/json, text/plain, */*",
-    "Referer": "https://loterias.caixa.gov.br/",
-    "Origin": "https://loterias.caixa.gov.br",
+    "Accept": "application/json",
 }
 MONTHS = {
     "janeiro": 1, "fevereiro": 2, "marco": 3, "março": 3, "abril": 4,
