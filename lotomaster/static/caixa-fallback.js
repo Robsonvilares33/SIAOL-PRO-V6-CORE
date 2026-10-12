@@ -17,6 +17,8 @@
     julho: 7, agosto: 8, setembro: 9, outubro: 10, novembro: 11, dezembro: 12,
   };
   const SOURCE = 'CAIXA — consulta direta pelo navegador';
+  const REQUEST_TIMEOUT_MS = 8000;
+  const HISTORY_BUDGET_MS = 15000;
 
   function integers(values) {
     return (Array.isArray(values) ? values : []).map(value => Number.parseInt(String(value).trim(), 10)).filter(Number.isFinite);
@@ -62,20 +64,33 @@
   function writeCache(key, value) {
     try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) { /* Cache opcional */ }
   }
-  async function fetchOfficial(item, contest) {
+  async function fetchOfficial(item, contest, parentSignal) {
     const suffix = contest == null ? '' : `/${encodeURIComponent(contest)}`;
-    const response = await fetch(`${CAIXA}/${item.endpoint}${suffix}`, {
-      method: 'GET', mode: 'cors', credentials: 'omit', cache: 'no-store',
-      headers: { Accept: 'application/json, text/plain, */*' },
-    });
-    if (!response.ok) throw new Error(`API pública da CAIXA respondeu HTTP ${response.status}.`);
-    const raw = await response.json();
-    if (!raw || !raw.numero) throw new Error('A CAIXA não retornou um concurso válido.');
-    const draw = normalize(item, raw);
-    if (!draw.numbers.length) throw new Error('A resposta oficial não contém dezenas.');
-    if (contest != null && draw.contest !== Number(contest)) throw new Error('O identificador do concurso retornado não corresponde à consulta.');
-    writeCache(`lotomaster:caixa:latest:${item.key}`, draw);
-    return draw;
+    const controller = new AbortController();
+    const abortFromParent = () => controller.abort();
+    if (parentSignal?.aborted) controller.abort();
+    else parentSignal?.addEventListener('abort', abortFromParent, { once: true });
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${CAIXA}/${item.endpoint}${suffix}`, {
+        method: 'GET', mode: 'cors', credentials: 'omit', cache: 'no-store',
+        headers: { Accept: 'application/json, text/plain, */*' }, signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`API pública da CAIXA respondeu HTTP ${response.status}.`);
+      const raw = await response.json();
+      if (!raw || !raw.numero) throw new Error('A CAIXA não retornou um concurso válido.');
+      const draw = normalize(item, raw);
+      if (!draw.numbers.length) throw new Error('A resposta oficial não contém dezenas.');
+      if (contest != null && draw.contest !== Number(contest)) throw new Error('O identificador do concurso retornado não corresponde à consulta.');
+      writeCache(`lotomaster:caixa:latest:${item.key}`, draw);
+      return draw;
+    } catch (error) {
+      if (error?.name === 'AbortError') throw new Error('A consulta à CAIXA excedeu o limite de tempo.');
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      parentSignal?.removeEventListener('abort', abortFromParent);
+    }
   }
   async function latest(item) {
     try { return await fetchOfficial(item); }
@@ -90,27 +105,34 @@
     const cacheKey = `lotomaster:caixa:history:${item.key}`;
     const cachedRows = readCache(cacheKey);
     const byContest = new Map((Array.isArray(cachedRows) ? cachedRows : []).map(row => [Number(row.contest), row]));
+    const controller = new AbortController();
+    const deadline = setTimeout(() => controller.abort(), HISTORY_BUDGET_MS);
     let newest;
-    try { newest = await fetchOfficial(item); }
-    catch (error) {
-      newest = readCache(`lotomaster:caixa:latest:${item.key}`);
-      if (!newest) throw error;
-    }
-    byContest.set(Number(newest.contest), newest);
-    const first = Math.max(1, Number(newest.contest) - limit + 1);
-    const missing = [];
-    for (let contest = first; contest < Number(newest.contest); contest += 1) {
-      if (!byContest.has(contest)) missing.push(contest);
-    }
-    let next = 0;
-    const workers = Array.from({ length: Math.min(4, missing.length) }, async () => {
-      while (next < missing.length) {
-        const index = next++;
-        const contest = missing[index];
-        try { byContest.set(contest, await fetchOfficial(item, contest)); } catch (_) { /* mantém resultados parciais */ }
+    let first = 1;
+    try {
+      try { newest = await fetchOfficial(item, null, controller.signal); }
+      catch (error) {
+        newest = readCache(`lotomaster:caixa:latest:${item.key}`);
+        if (!newest) throw error;
       }
-    });
-    await Promise.all(workers);
+      byContest.set(Number(newest.contest), newest);
+      first = Math.max(1, Number(newest.contest) - limit + 1);
+      const missing = [];
+      for (let contest = first; contest < Number(newest.contest); contest += 1) {
+        if (!byContest.has(contest)) missing.push(contest);
+      }
+      let next = 0;
+      const workers = Array.from({ length: Math.min(4, missing.length) }, async () => {
+        while (next < missing.length && !controller.signal.aborted) {
+          const index = next++;
+          const contest = missing[index];
+          try { byContest.set(contest, await fetchOfficial(item, contest, controller.signal)); } catch (_) { /* mantém resultados parciais */ }
+        }
+      });
+      await Promise.all(workers);
+    } finally {
+      clearTimeout(deadline);
+    }
     const rows = [...byContest.values()]
       .filter(row => Number(row.contest) >= first && Number(row.contest) <= Number(newest.contest))
       .sort((a, b) => Number(b.contest) - Number(a.contest))
