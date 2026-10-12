@@ -17,7 +17,7 @@
     julho: 7, agosto: 8, setembro: 9, outubro: 10, novembro: 11, dezembro: 12,
   };
   const SOURCE = 'CAIXA — consulta direta pelo navegador';
-  const REQUEST_TIMEOUT_MS = 8000;
+  const REQUEST_TIMEOUT_MS = 20000;
   const HISTORY_BUDGET_MS = 15000;
 
   function integers(values) {
