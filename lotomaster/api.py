@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from . import storage
 from .analytics import analyze_draws
+from .assistant import build_assistant_report
 from .caixa import fetch_draw
 from .catalog import get_spec, public_catalog, public_spec
 from .engine import generate_tickets, latest_result, list_results, simulate_tickets, ticket_probability
@@ -47,6 +48,11 @@ class Ticket(BaseModel):
 class SimulateRequest(BaseModel):
     tickets: list[Ticket] = Field(default_factory=list)
     contest: int | None = None
+    draw: dict | None = None
+
+
+class AnalyzeDrawsRequest(BaseModel):
+    draws: list[dict] = Field(default_factory=list)
 
 
 @app.on_event("startup")
@@ -56,7 +62,7 @@ def startup():
 
 @app.get("/api/v1/health")
 def health():
-    return {"status": "ok", "app": "Lotomaster", "version": app.version}
+    return {"status": "ok", "app": "Lotomaster", "version": app.version, "official_results_source": "API pública da CAIXA"}
 
 
 @app.get("/api/v1/lotteries")
@@ -87,6 +93,23 @@ def game_results(game: str, limit: int = Query(default=20, ge=1, le=300)):
         raise HTTPException(status_code=502, detail=str(exc))
 
 
+@app.post("/api/v1/{game}/statistics/from-draws")
+def game_statistics_from_draws(game: str, request: AnalyzeDrawsRequest):
+    try:
+        spec = get_spec(game)
+        if not request.draws or len(request.draws) > 300:
+            raise HTTPException(status_code=422, detail="Informe de 1 a 300 concursos para análise.")
+        if any(draw.get("game") != spec["key"] for draw in request.draws):
+            raise HTTPException(status_code=422, detail="Todos os concursos precisam ser da mesma modalidade.")
+        return analyze_draws(spec["key"], request.draws)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Modalidade não encontrada.")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
 @app.get("/api/v1/{game}/statistics")
 def game_statistics(
     game: str,
@@ -111,6 +134,35 @@ def game_statistics(
         raise HTTPException(status_code=502, detail=str(exc))
 
 
+@app.get("/api/v1/{game}/assistant")
+def game_assistant(game: str, limit: int = Query(default=50, ge=1, le=300), use_gemini: bool = True):
+    try:
+        spec = get_spec(game)
+        draws = list_results(spec["key"], limit=limit)
+        return build_assistant_report(spec["key"], draws, use_gemini=use_gemini)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Modalidade não encontrada.")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.post("/api/v1/{game}/assistant/from-draws")
+def game_assistant_from_draws(game: str, request: AnalyzeDrawsRequest):
+    try:
+        spec = get_spec(game)
+        if not request.draws or len(request.draws) > 300:
+            raise HTTPException(status_code=422, detail="Informe de 1 a 300 concursos para análise.")
+        if any(draw.get("game") != spec["key"] for draw in request.draws):
+            raise HTTPException(status_code=422, detail="Todos os concursos precisam ser da mesma modalidade.")
+        return build_assistant_report(spec["key"], request.draws)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Modalidade não encontrada.")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
 @app.post("/api/v1/{game}/generate")
 def game_generate(game: str, request: GenerateRequest):
     try:
@@ -131,7 +183,11 @@ def game_simulate(game: str, request: SimulateRequest):
         spec = get_spec(game)
         if not request.tickets:
             raise HTTPException(status_code=422, detail="Informe ao menos um jogo para conferir.")
-        if request.contest:
+        if request.draw is not None:
+            draw = request.draw
+            if draw.get("game") != spec["key"] or not draw.get("contest") or not draw.get("numbers"):
+                raise HTTPException(status_code=422, detail="O resultado informado não corresponde à modalidade ou está incompleto.")
+        elif request.contest:
             draw = storage.get_draw(spec["key"], request.contest)
             if not draw:
                 draw = fetch_draw(spec["key"], request.contest)

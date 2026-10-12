@@ -13,7 +13,9 @@ class LotomasterApiTests(unittest.TestCase):
         cls.client = TestClient(app)
 
     def test_health_and_catalog(self):
-        self.assertEqual(self.client.get("/api/v1/health").status_code, 200)
+        health = self.client.get("/api/v1/health")
+        self.assertEqual(health.status_code, 200)
+        self.assertEqual(health.json()["official_results_source"], "API pública da CAIXA")
         response = self.client.get("/api/v1/lotteries")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["count"], 9)
@@ -29,6 +31,30 @@ class LotomasterApiTests(unittest.TestCase):
             self.assertEqual(response.json()["results"][0]["main_hits"], 4)
             invalid = self.client.post("/api/v1/megasena/simulate", json={"tickets": [{"numbers": [1, 2, 3, 4, 5]}]})
             self.assertEqual(invalid.status_code, 422)
+
+    def test_simulate_uses_official_draw_supplied_by_browser(self):
+        draw = {"game": "megasena", "contest": 50, "draw_date": "01/01/2026", "numbers": [1, 2, 3, 4, 5, 6]}
+        with patch("lotomaster.api.latest_result", side_effect=AssertionError("não deve consultar a Caixa")):
+            response = self.client.post("/api/v1/megasena/simulate", json={"tickets": [{"numbers": [1, 2, 3, 4, 7, 8]}], "draw": draw})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["contest"], 50)
+        self.assertEqual(response.json()["results"][0]["main_hits"], 4)
+
+    def test_assistant_and_analysis_from_official_browser_history(self):
+        draws = [
+            {"game": "megasena", "contest": 50, "numbers": [1, 2, 3, 4, 5, 6]},
+            {"game": "megasena", "contest": 49, "numbers": [1, 7, 8, 9, 10, 11]},
+        ]
+        with patch("lotomaster.api.list_results", return_value=draws):
+            assistant = self.client.get("/api/v1/megasena/assistant?use_gemini=false")
+        self.assertEqual(assistant.status_code, 200)
+        self.assertEqual(assistant.json()["draws_analyzed"], 2)
+        self.assertEqual(assistant.json()["selection_policy"], "uniform_random")
+        computed = self.client.post("/api/v1/megasena/statistics/from-draws", json={"draws": draws})
+        self.assertEqual(computed.status_code, 200)
+        self.assertEqual(computed.json()["latest_contest"], 50)
+        wrong_game = self.client.post("/api/v1/quina/statistics/from-draws", json={"draws": draws})
+        self.assertEqual(wrong_game.status_code, 422)
 
     def test_day_of_fortune_generate_rejects_month_thirteen(self):
         response = self.client.post("/api/v1/diadesorte/generate", json={"bonus": {"month": 13}})

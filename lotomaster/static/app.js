@@ -2,12 +2,12 @@ const API = '/api/v1';
 const state = {
   catalog: [], game: 'lotofacil', page: 'overview', mode: 'fixed',
   generated: [], simulatorText: '', simulatorTickets: [], simulatorBonus: {}, statId: 'frequency', statsPayload: null,
-  resultCache: null,
+  resultCache: null, lastContests: {},
 };
 let renderVersion = 0;
 const pageNames = {
   overview: 'Visão geral', generator: 'Gerador de jogos', simulator: 'Conferir jogos',
-  results: 'Resultados', statistics: 'Tabelas e estatísticas', tools: 'Outras ferramentas',
+  results: 'Resultados', statistics: 'Tabelas e estatísticas', assistant: 'Assistente analítico', tools: 'Outras ferramentas',
 };
 const months = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
 const $ = (selector, root=document) => root.querySelector(selector);
@@ -27,11 +27,24 @@ function money(value) {
   return n ? n.toLocaleString('pt-BR',{style:'currency',currency:'BRL',maximumFractionDigits:2}) : '—';
 }
 async function api(path, options={}) {
-  const response = await fetch(`${API}${path}`, {headers:{'Content-Type':'application/json',...(options.headers||{})},...options});
-  const contentType = response.headers.get('content-type') || '';
-  const payload = contentType.includes('application/json') ? await response.json() : await response.text();
-  if (!response.ok) throw new Error(payload?.detail || payload || `Erro HTTP ${response.status}`);
-  return payload;
+  const method=(options.method||'GET').toUpperCase();
+  try {
+    const response = await fetch(`${API}${path}`, {headers:{'Content-Type':'application/json',...(options.headers||{})},...options});
+    const contentType = response.headers.get('content-type') || '';
+    const payload = contentType.includes('application/json') ? await response.json() : await response.text();
+    if (!response.ok) throw new Error(payload?.detail || payload || `Erro HTTP ${response.status}`);
+    return payload;
+  } catch(error) {
+    if (method==='GET' && window.lotomasterCaixaFallback && !error.recovered) {
+      try {
+        const recovered=await window.lotomasterCaixaFallback(path);
+        if (recovered!==undefined) return recovered;
+      } catch(fallbackError) {
+        throw new Error(`${error.message} · Consulta direta da CAIXA também falhou: ${fallbackError.message}`);
+      }
+    }
+    throw error;
+  }
 }
 function setNotice(message, type='notice') {
   const main = $('#main-content');
@@ -63,10 +76,11 @@ function resultCard(draw, item=spec()) {
   if (draw.team) extras.push(`<div class="result-extras">Time do Coração: <b>${esc(draw.team)}</b></div>`);
   const awardCount = (draw.winners_by_tier||[]).reduce((sum,row)=>sum+Number(row.winners||0),0);
   return `<div class="card result-card">
-    <div class="card-head"><div><h2 class="card-title">${esc(item.name)} · concurso ${esc(draw.contest)}</h2><div class="result-meta">${esc(draw.draw_date||'Data não informada')} · ${esc(draw.location||'Portal da CAIXA')}</div></div><span class="pill ${draw.accumulated?'pill-warm':'pill-muted'}">${draw.accumulated?'Acumulado':'Apurado'}</span></div>
+    <div class="card-head"><div><h2 class="card-title">${esc(item.name)} · concurso ${esc(draw.contest)}</h2><div class="result-meta">${esc(draw.draw_date||'Data não informada')} · ${esc(draw.source||draw.location||'Portal da CAIXA')}</div></div><span class="pill ${draw.accumulated?'pill-warm':'pill-muted'}">${draw.accumulated?'Acumulado':'Apurado'}</span></div>
     <div class="ball-row">${balls(draw.numbers,false,item.digits)}</div>
     ${extras.join('')}
     <div class="result-kpis"><span>Prêmio estimado<b>${esc(money(draw.estimated_prize))}</b></span><span>Próximo acumulado<b>${esc(money(draw.next_prize))}</b></span><span>Ganhadores em faixas<b>${esc(awardCount.toLocaleString('pt-BR'))}</b></span></div>
+    ${draw.warning?`<div class="small-note" style="color:#ffe0b0;margin-top:9px">${esc(draw.warning)} · exibindo cache disponível.</div>`:''}
   </div>`;
 }
 function drawMini(draw, item) {
@@ -88,6 +102,7 @@ async function render() {
   if (state.page==='simulator') return renderSimulator();
   if (state.page==='results') return renderResults();
   if (state.page==='statistics') return renderStatistics();
+  if (state.page==='assistant') return renderAssistant();
   if (state.page==='tools') return renderTools();
 }
 
@@ -95,6 +110,7 @@ async function renderOverview(version=renderVersion) {
   loading('Consultando resultados oficiais...');
   const promises = state.catalog.map(item => api(`/${item.key}/latest`).then(data=>({item,data})).catch(error=>({item,error})));
   const rows = await Promise.all(promises);
+  rows.forEach(row=>{if(row.data)state.lastContests[row.item.key]=Number(row.data.contest);});
   if (version!==renderVersion || state.page!=='overview') return;
   const active = rows.find(row=>row.item.key===state.game);
   const successful = rows.filter(row=>row.data);
@@ -197,6 +213,32 @@ async function loadSelectedStat() {
     container.innerHTML=table?`<h3 class="card-title" style="margin:0 0 12px">${esc(table.title)}</h3>${statTable(table)}`:'<div class="empty-state">Esta tabela ainda não possui cálculo separado. Consulte a análise geral.</div>';
   } catch(error) { container.innerHTML=errorBlock(error.message); }
 }
+async function renderAssistant() {
+  const item=spec(); const version=renderVersion;
+  $('#main-content').innerHTML=`${pageHeader('Análise explicável · '+item.name,'Assistente analítico',`Resumo do histórico oficial, com seleção aleatória e limites científicos explícitos.`)}<div class="notice"><span>ⓘ</span><span>O assistente descreve dados observados; frequência e atraso não predizem concursos futuros. Não há probabilidades calibradas fora da amostra para dezenas individuais.</span></div><div class="card"><div class="card-head"><div><h2 class="card-title">Leitura do histórico</h2><div class="card-subtitle">Amostra inicial de até 50 concursos; os cálculos e odds teóricas ficam separados.</div></div><span id="assistant-status" class="pill">Analisando…</span></div><div id="assistant-content"><div class="loading-block"><span class="spinner"></span>Consultando resultados oficiais e calculando estatísticas...</div></div></div><div class="card" style="margin-top:16px"><div class="card-head"><div><h2 class="card-title">Gerar combinação aleatória</h2><div class="card-subtitle">A IA não favorece dezenas históricas; cada combinação legal mantém a chance teórica definida pelas regras.</div></div></div><div class="form-actions"><button class="button button-primary" data-action="assistant-generate">Montar uma combinação aleatória</button></div><div id="assistant-ticket"></div></div>`;
+  try {
+    const data=await api(`/${item.key}/assistant?limit=50`);
+    if (version!==renderVersion || state.page!=='assistant' || state.game!==item.key) return;
+    $('#assistant-status').textContent=data.ai?.status==='available'?`Gemini · ${data.ai.model}`:'Análise explicável local';
+    const top=(data.historical_summary?.most_frequent||[]).slice(0,5).map(row=>`${padNum(row.number,item.digits)} (${row.count})`).join(' · ')||'—';
+    const low=(data.historical_summary?.least_frequent||[]).slice(0,5).map(row=>`${padNum(row.number,item.digits)} (${row.count})`).join(' · ')||'—';
+    $('#assistant-content').innerHTML=`<div class="stats-highlight"><div class="mini-stat"><small>Concursos analisados</small><b>${esc(data.draws_analyzed)}</b></div><div class="mini-stat"><small>Concurso mais recente</small><b>${esc(data.latest_contest||'—')}</b></div><div class="mini-stat"><small>Maiores contagens observadas</small><b>${esc(top)}</b></div><div class="mini-stat"><small>Menores contagens observadas</small><b>${esc(low)}</b></div></div><p>${esc(data.commentary)}</p><div class="notice"><span>ⓘ</span><span>${esc(data.disclaimer)}</span></div>`;
+  } catch(error) {
+    if (version!==renderVersion) return;
+    $('#assistant-status').textContent='Sem conexão';
+    $('#assistant-content').innerHTML=errorBlock(error.message);
+  }
+}
+async function generateAssistantTicket() {
+  const item=spec(); const target=$('#assistant-ticket');
+  if (!target) return;
+  target.innerHTML='<div class="loading-block"><span class="spinner"></span>Gerando combinação aleatória...</div>';
+  try {
+    const data=await api(`/${item.key}/generate`,{method:'POST',body:JSON.stringify({count:1})});
+    const ticket=data.items[0];
+    target.innerHTML=`<div class="generated-ticket"><div class="generated-ticket-head"><b>Jogo aleatório</b><span class="pill">Sem ponderação histórica</span></div>${item.key==='supersete'?`<div class="col-grid">${ticket.columns.map((values,index)=>`<div class="col-box"><strong>COLUNA ${index+1}</strong>${balls(values)}</div>`).join('')}</div>`:`<div class="ball-row">${balls(ticket.numbers,false,item.digits)}</div>`}<div class="ticket-stats">Chance combinatória teórica por jogo: 1 em ${esc(Number(ticket.probability.one_in).toLocaleString('pt-BR'))}</div><div class="small-note">${esc(data.disclaimer)}</div></div>`;
+  } catch(error) { target.innerHTML=errorBlock(error.message); }
+}
 async function renderTools() {
   const item=spec(); const version=renderVersion;
   let tools=[];
@@ -265,7 +307,8 @@ async function handleSimulate(event) {
   }
   const target=$('#sim-result'); target.innerHTML='<div class="loading-block"><span class="spinner"></span>Conferindo...</div>';
   try {
-    const response=await api(`/${item.key}/simulate`,{method:'POST',body:JSON.stringify({tickets})});
+    const draw=await api(`/${item.key}/latest`);
+    const response=await api(`/${item.key}/simulate`,{method:'POST',body:JSON.stringify({tickets,draw})});
     if (version!==renderVersion || state.page!=='simulator' || state.game!==item.key) return;
     target.innerHTML=`<div class="card" style="box-shadow:none;padding:12px;border-color:#dfe9de"><div class="card-head"><div><h3 class="card-title">Resultado do concurso ${esc(response.contest)}</h3><div class="card-subtitle">${esc(response.draw_date||'')}</div></div><span class="pill">Oficial</span></div><div class="ball-row">${balls(response.draw.numbers)}${response.draw.second_numbers?.length?balls(response.draw.second_numbers):''}${response.draw.trevos?.length?balls(response.draw.trevos,true):''}</div>${response.results.map(result=>`<div class="draw-row"><div class="draw-title">Jogo ${esc(result.ticket_number)}</div><div>${result.main_hits!==undefined?`<b>${esc(result.main_hits)} acertos</b>`:`<b>${esc(result.hits)} colunas</b>`}${result.second_hits!==undefined?` · 2º sorteio ${esc(result.second_hits)}`:''} ${result.award?`<span class="pill pill-warm">${esc(typeof result.award==='string'?result.award:JSON.stringify(result.award))}</span>`:'<span class="pill pill-muted">Sem faixa de premiação</span>'}${result.month_hit?'<span class="pill">Mês da Sorte</span>':''}${result.team_hit?'<span class="pill">Time do Coração</span>':''}${result.trevo_hits?`<span class="pill">${esc(result.trevo_hits)} trevos</span>`:''}</div></div>`).join('')}<div class="small-note">A conferência é informativa; confirme premiações no portal oficial da CAIXA.</div></div>`;
   } catch(error) { target.innerHTML=errorBlock(error.message); }
@@ -296,6 +339,7 @@ function handleClick(event) {
     columnButton.classList.toggle('on',!on);
     return;
   }
+  if (event.target.closest('[data-action="assistant-generate"]')) { generateAssistantTicket(); return; }
   if (event.target.closest('[data-action="test-generated"]')) {
     const item=spec();
     state.simulatorText=state.generated.map(ticket=>item.key==='supersete'?ticket.numbers.join(' '):ticket.numbers.map(n=>padNum(n,item.digits)).join(' ')).join('\n');
@@ -314,13 +358,32 @@ async function init() {
     const data=await api('/lotteries'); state.catalog=data.items;
     renderGameNav();
     $('#game-picker').addEventListener('change',e=>{state.game=e.target.value;state.page='overview';state.generated=[];state.simulatorTickets=[];state.simulatorText='';state.simulatorBonus={};render();});
-    $('#refresh-button').addEventListener('click',()=>render());
+    $('#refresh-button').addEventListener('click',()=>refreshLiveData(true));
     $('#menu-toggle').addEventListener('click',()=>$('#sidebar').classList.toggle('open'));
     $('#main-content').addEventListener('click',handleClick);
     $('#main-content').addEventListener('submit',handleSubmit);
     $('#game-nav').addEventListener('click',event=>{const target=event.target.closest('[data-game]');if(target){state.game=target.dataset.game;state.page='overview';state.generated=[];state.simulatorTickets=[];state.simulatorText='';state.simulatorBonus={};render();}});
     $$('.section-nav [data-page]').forEach(button=>button.addEventListener('click',()=>{state.page=button.dataset.page;render();}));
     await render();
+    state.lastRefreshAt=Date.now();
+    window.setInterval(()=>refreshLiveData(false),5*60*1000);
+    document.addEventListener('visibilitychange',()=>{
+      if (!document.hidden && Date.now()-(state.lastRefreshAt||0)>=5*60*1000) refreshLiveData(false);
+    });
   } catch(error) { $('#main-content').innerHTML=errorBlock(`Não foi possível inicializar a Lotomaster: ${error.message}`); }
+}
+async function refreshLiveData(force) {
+  if (!state.catalog.length || document.hidden) return;
+  const page=state.page;
+  const latest=await Promise.all(state.catalog.map(item=>api(`/${item.key}/latest`).then(draw=>({item,draw})).catch(()=>null)));
+  state.lastRefreshAt=Date.now();
+  if ($('#sync-status')) $('#sync-status').textContent=`Conferido ${new Date(state.lastRefreshAt).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}`;
+  let changed=false;
+  latest.filter(Boolean).forEach(({item,draw})=>{
+    const current=Number(draw.contest);
+    if (state.lastContests[item.key]!==undefined && state.lastContests[item.key]!==current) changed=true;
+    state.lastContests[item.key]=current;
+  });
+  if (force || (changed && ['overview','results','statistics','assistant'].includes(page))) await render();
 }
 window.addEventListener('DOMContentLoaded',init);

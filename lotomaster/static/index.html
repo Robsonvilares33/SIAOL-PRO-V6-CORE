@@ -24,6 +24,7 @@
         <button class="nav-item" data-page="simulator"><span class="nav-icon">✓</span>Conferir jogos</button>
         <button class="nav-item" data-page="results"><span class="nav-icon">◷</span>Resultados</button>
         <button class="nav-item" data-page="statistics"><span class="nav-icon">▤</span>Tabelas e estatísticas</button>
+        <button class="nav-item" data-page="assistant"><span class="nav-icon">✧</span>Assistente analítico</button>
         <button class="nav-item" data-page="tools"><span class="nav-icon">⌘</span>Outras ferramentas</button>
       </nav>
       <div class="sidebar-foot">
@@ -39,6 +40,7 @@
         <div class="top-actions">
           <label class="game-picker-label" for="game-picker">Modalidade</label>
           <select id="game-picker" aria-label="Selecionar modalidade"></select>
+          <span id="sync-status" class="small-note" role="status">Atualiza automaticamente a cada 5 min</span>
           <button class="icon-button" id="refresh-button" title="Atualizar dados" aria-label="Atualizar dados">↻</button>
         </div>
       </header>
@@ -52,6 +54,7 @@
     </div>
   </div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/assets/caixa-fallback.js" defer></script>
   <script src="/assets/app.js" defer></script>
 </body>
 </html>

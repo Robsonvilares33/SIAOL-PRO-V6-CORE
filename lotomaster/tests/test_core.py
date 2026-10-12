@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from lotomaster.analytics import analyze_draws
+from lotomaster.assistant import build_assistant_report
 from lotomaster.caixa import normalize_draw
 from lotomaster.catalog import LOTTERIES, get_spec
 from lotomaster.engine import generate_tickets, simulate_tickets, ticket_probability
@@ -133,6 +134,18 @@ class AnalyticsTests(unittest.TestCase):
     def test_probability_for_base_mega(self):
         result = ticket_probability("megasena", 6)
         self.assertEqual(result["one_in"], 50063860)
+
+    def test_assistant_labels_history_as_descriptive_and_uses_random_selection(self):
+        draws = [
+            {"game": "megasena", "contest": 2, "numbers": [1, 2, 3, 4, 5, 6]},
+            {"game": "megasena", "contest": 1, "numbers": [1, 7, 8, 9, 10, 11]},
+        ]
+        result = build_assistant_report("megasena", draws, use_gemini=False)
+        self.assertEqual(result["draws_analyzed"], 2)
+        self.assertEqual(result["selection_policy"], "uniform_random")
+        self.assertFalse(result["probabilities_calibrated_out_of_sample"])
+        self.assertIn("não", result["disclaimer"])
+        self.assertEqual(result["ai"]["status"], "local_only")
 
 
 if __name__ == "__main__":

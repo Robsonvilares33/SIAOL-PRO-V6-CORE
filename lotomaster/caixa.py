@@ -5,7 +5,12 @@ import requests
 from .catalog import get_spec
 
 BASE_URL = "https://servicebus2.caixa.gov.br/portaldeloterias/api"
-HEADERS = {"User-Agent": "Lotomaster/1.0 (consulta publica de resultados)"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; Lotomaster/1.1; consulta de resultados publicos)",
+    "Accept": "application/json, text/plain, */*",
+    "Referer": "https://loterias.caixa.gov.br/",
+    "Origin": "https://loterias.caixa.gov.br",
+}
 MONTHS = {
     "janeiro": 1, "fevereiro": 2, "marco": 3, "março": 3, "abril": 4,
     "maio": 5, "junho": 6, "julho": 7, "agosto": 8, "setembro": 9,
@@ -100,6 +105,8 @@ def fetch_draw(game: str, contest: int | None = None) -> dict:
     if not isinstance(payload, dict) or not payload.get("numero"):
         raise ValueError(f"A CAIXA não retornou um concurso válido para {spec['name']}.")
     draw = normalize_draw(spec["key"], payload)
+    if contest is not None and draw["contest"] != int(contest):
+        raise ValueError(f"A CAIXA retornou o concurso {draw['contest']} em vez do concurso {int(contest)}.")
     if not draw["numbers"]:
         raise ValueError(f"A resposta da CAIXA não trouxe dezenas para {spec['name']}.")
     return draw
