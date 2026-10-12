@@ -5,7 +5,11 @@ import sqlite3
 import threading
 from pathlib import Path
 
-_DEFAULT_DB = Path(__file__).resolve().parent.parent / ".lotomaster.sqlite3"
+_DEFAULT_DB = (
+    Path(os.getenv("TMPDIR", "/tmp")) / ".lotomaster.sqlite3"
+    if os.getenv("VERCEL") == "1"
+    else Path(__file__).resolve().parent.parent / ".lotomaster.sqlite3"
+)
 DB_PATH = Path(os.getenv("LOTOMASTER_DB_PATH", str(_DEFAULT_DB))).expanduser()
 _init_lock = threading.Lock()
 _initialized = False
