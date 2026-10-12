@@ -1,2 +1,12 @@
+[project]
+name = "siaol-pro-v6-core"
+version = "0.1.0"
+description = "Backend FastAPI e frontend Lotomaster"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "requests",
+]
+
 [tool.vercel]
 entrypoint = "lotomaster.api:app"
