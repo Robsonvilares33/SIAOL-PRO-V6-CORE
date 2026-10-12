@@ -95,6 +95,14 @@ class SimulationTests(unittest.TestCase):
         team = simulate_tickets("timemania", [{"numbers": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "bonus": {"team": "Time A"}}], {"contest": 4, "numbers": [1, 2, 3, 11, 12, 13, 14], "team": "Time A"})[0]
         self.assertTrue(team["team_hit"])
 
+    def test_milionaria_requires_trevos_and_only_awards_defined_tiers(self):
+        draw = {"contest": 9, "numbers": [1, 2, 3, 4, 5, 6], "trevos": [1, 2]}
+        with self.assertRaisesRegex(ValueError, "trevos"):
+            simulate_tickets("maismilionaria", [{"numbers": [1, 2, 3, 4, 5, 6]}], draw)
+        result = simulate_tickets("maismilionaria", [{"numbers": [1, 2, 3, 20, 21, 22], "bonus": {"trevos": [3, 4]}}], draw)[0]
+        self.assertEqual(result["trevo_hits"], 0)
+        self.assertIsNone(result["award"])
+
     def test_super_sete_scores_columns(self):
         draw = {"contest": 15, "numbers": [1, 2, 3, 4, 5, 6, 7]}
         ticket = {"columns": [[1], [2], [3], [0], [5], [1], [7]]}

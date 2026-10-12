@@ -128,7 +128,16 @@ def generate_tickets(game: str, options: dict | None = None) -> list[dict]:
         bonus_type = bonus.get("type")
         if bonus_type == "month":
             month = bonus_options.get("month")
-            extra["month"] = int(month) if month else rng.randint(1, 12)
+            if month in (None, ""):
+                month = rng.randint(bonus["minimum"], bonus["maximum"])
+            else:
+                try:
+                    month = int(month)
+                except (TypeError, ValueError):
+                    raise ValueError(f"O Mês da Sorte deve estar entre {bonus['minimum']} e {bonus['maximum']}.") from None
+                if not bonus["minimum"] <= month <= bonus["maximum"]:
+                    raise ValueError(f"O Mês da Sorte deve estar entre {bonus['minimum']} e {bonus['maximum']}.")
+            extra["month"] = month
         elif bonus_type == "team":
             extra["team"] = str(bonus_options.get("team", "")).strip()
         elif bonus_type == "trevos":
@@ -220,8 +229,7 @@ def simulate_tickets(game: str, tickets: list[dict], draw: dict) -> list[dict]:
             trevo_hits = len(set(_int_list(bonus.get("trevos", []))) & set(draw.get("trevos", [])))
             extra["trevo_hits"] = trevo_hits
             extra["drawn_trevos"] = draw.get("trevos", [])
-            label = _million_award(main_hits, trevo_hits)
-            award = label or award
+            award = _million_award(main_hits, trevo_hits)
         results.append({"ticket_number": ticket.get("ticket_number", idx), "main_hits": main_hits, "hits": main_hits, "award": award, "draw_contest": draw.get("contest"), **extra})
     return results
 
@@ -247,10 +255,13 @@ def _validate_ticket(spec: dict, ticket: dict) -> None:
         raise ValueError(f"As dezenas de {spec['name']} precisam estar no intervalo {spec['minimum']}–{spec['maximum']}.")
     if bonus.get("month") not in (None, "") and not 1 <= int(bonus["month"]) <= 12:
         raise ValueError("O Mês da Sorte deve estar entre 1 e 12.")
-    if bonus.get("trevos"):
-        trevos = _int_list(bonus["trevos"])
-        if not 2 <= len(trevos) <= 6 or len(set(trevos)) != len(trevos) or any(n < 1 or n > 6 for n in trevos):
-            raise ValueError("Escolha de 2 a 6 trevos distintos entre 1 e 6.")
+    if key == "maismilionaria" or bonus.get("trevos"):
+        trevos = _int_list(bonus.get("trevos"))
+        bonus_spec = spec.get("bonus") or {}
+        minimum = bonus_spec.get("minimum", 2)
+        maximum = bonus_spec.get("maximum", 6)
+        if not minimum <= len(trevos) <= maximum or len(set(trevos)) != len(trevos) or any(n < 1 or n > 6 for n in trevos):
+            raise ValueError(f"Escolha de {minimum} a {maximum} trevos distintos entre 1 e 6.")
 
 
 def _award(spec: dict, hits: int) -> str | None:

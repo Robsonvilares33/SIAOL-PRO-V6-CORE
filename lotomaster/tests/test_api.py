@@ -30,6 +30,21 @@ class LotomasterApiTests(unittest.TestCase):
             invalid = self.client.post("/api/v1/megasena/simulate", json={"tickets": [{"numbers": [1, 2, 3, 4, 5]}]})
             self.assertEqual(invalid.status_code, 422)
 
+    def test_day_of_fortune_generate_rejects_month_thirteen(self):
+        response = self.client.post("/api/v1/diadesorte/generate", json={"bonus": {"month": 13}})
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("Mês da Sorte", response.json()["detail"])
+
+    def test_milionaria_simulate_requires_trevos(self):
+        draw = {"game": "maismilionaria", "contest": 1, "draw_date": "01/01/2026", "numbers": [1, 2, 3, 4, 5, 6], "trevos": [1, 2]}
+        with patch("lotomaster.api.latest_result", return_value=draw):
+            missing_trevos = self.client.post("/api/v1/maismilionaria/simulate", json={"tickets": [{"numbers": [1, 2, 3, 4, 5, 6]}]})
+            valid_ticket = self.client.post("/api/v1/maismilionaria/simulate", json={"tickets": [{"numbers": [1, 2, 3, 4, 5, 6], "bonus": {"trevos": [1, 2]}}]})
+        self.assertEqual(missing_trevos.status_code, 422)
+        self.assertIn("trevos", missing_trevos.json()["detail"])
+        self.assertEqual(valid_ticket.status_code, 200)
+        self.assertEqual(valid_ticket.json()["results"][0]["award"], "6 acertos + 2 trevos")
+
     def test_csv_and_txt_exports(self):
         sample = [{"contest": 50, "draw_date": "01/01/2026", "numbers": [1, 2, 3, 4, 5, 6], "second_numbers": [], "trevos": [], "month": None, "team": None, "accumulated": False, "estimated_prize": 1000}]
         with patch("lotomaster.api.list_results", return_value=sample):
