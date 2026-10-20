@@ -1,6 +1,6 @@
 {
-  "version": "9.0.127",
-  "generation": 548,
+  "version": "9.0.128",
+  "generation": 551,
   "weights": {
     "freq": 0.1408,
     "gap": 0.2715,
@@ -11,7 +11,7 @@
     "pair": 0.0067
   },
   "sharp_exp": 1.95,
-  "core_pct": 0.59,
+  "core_pct": 0.516,
   "pool_mult": 1.3,
   "pair_boost_factor": 0.772,
   "windows": [
@@ -682,6 +682,11 @@
       "gen": 548,
       "fitness": 11.2667,
       "timestamp": "2026-10-18T17:54:52.697754"
+    },
+    {
+      "gen": 551,
+      "fitness": 11.3,
+      "timestamp": "2026-10-20T19:04:24.983091"
     }
   ]
 }
