@@ -1,14 +1,14 @@
 {
-  "version": "9.0.141",
-  "generation": 585,
+  "version": "9.0.142",
+  "generation": 589,
   "weights": {
-    "freq": 0.1164,
-    "gap": 0.2032,
-    "markov": 0.0791,
-    "window": 0.1878,
-    "cycle": 0.21,
-    "trend": 0.1195,
-    "pair": 0.0839
+    "freq": 0.1004,
+    "gap": 0.2109,
+    "markov": 0.0865,
+    "window": 0.1949,
+    "cycle": 0.218,
+    "trend": 0.1021,
+    "pair": 0.0871
   },
   "sharp_exp": 1.75,
   "core_pct": 0.5,
@@ -29,7 +29,7 @@
     },
     {
       "size": 50,
-      "weight": 2.1
+      "weight": 3.32
     },
     {
       "size": 100,
@@ -43,7 +43,7 @@
   "filter": {
     "sum_sigma": 0.605,
     "even_sigma": 0.959,
-    "consec_sigma_low": 1.338,
+    "consec_sigma_low": 1.252,
     "consec_sigma_high": 1.434,
     "require_all_quadrants": true
   },
@@ -752,6 +752,11 @@
       "gen": 585,
       "fitness": 11.1667,
       "timestamp": "2026-11-04T21:07:12.274544"
+    },
+    {
+      "gen": 589,
+      "fitness": 11.1,
+      "timestamp": "2026-11-05T21:25:09.944439"
     }
   ]
 }
