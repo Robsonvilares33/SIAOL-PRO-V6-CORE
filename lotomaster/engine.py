@@ -1,6 +1,7 @@
 """Serviços de negócio da Lotomaster: histórico oficial, geração e conferência de jogos."""
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from math import comb
+from datetime import datetime, timezone
 import random
 import threading
 import time
@@ -19,20 +20,24 @@ def latest_result(game: str, refresh: bool = True) -> dict:
     key = spec["key"]
     now = time.monotonic()
     cached_mem = _latest_cache.get(key)
-    if not refresh and cached_mem and now - cached_mem[0] < _LATEST_TTL_SECONDS:
+    if not refresh and cached_mem and 0 <= now - cached_mem[0] < _LATEST_TTL_SECONDS:
         return {**cached_mem[1], "source": "cache"}
-    cached_db = storage.latest_draw(key)
-    if cached_mem and now - cached_mem[0] < _LATEST_TTL_SECONDS:
+    if cached_mem and 0 <= now - cached_mem[0] < _LATEST_TTL_SECONDS:
         return {**cached_mem[1], "source": "cache"}
     try:
         draw = fetch_draw(key)
         storage.save_draw(draw)
+        checked_at = datetime.now(timezone.utc).isoformat()
+        draw = {**draw, "_latest_checked_at": checked_at}
         _latest_cache[key] = (now, draw)
         return {**draw, "source": "CAIXA via Cloudflare Worker"}
     except Exception as exc:
+        cached_db = storage.latest_draw(key)
         if cached_db:
-            _latest_cache[key] = (now, cached_db)
-            return {**cached_db, "source": "cache", "warning": f"A CAIXA está temporariamente indisponível: {exc}"}
+            cached_db = {k: v for k, v in cached_db.items() if k not in {"_latest_checked_at", "_known_latest_contest"}}
+            stale = {**cached_db, "source": "cache", "warning": f"A CAIXA está temporariamente indisponível: {exc}"}
+            _latest_cache[key] = (now, stale)
+            return stale
         raise RuntimeError(f"Não foi possível consultar a CAIXA para {spec['name']}: {exc}") from exc
 
 
@@ -47,11 +52,14 @@ def list_results(game: str, limit: int = 20, refresh_latest: bool = True) -> lis
         latest = storage.latest_draw(key)
         if not latest:
             raise
-    cached = storage.list_draws(key, limit)
-    if limit > 1 and latest:
+    current_contest = int(latest["contest"])
+    lower = max(1, current_contest - limit + 1)
+    cached = storage.list_draws_range(key, lower, current_contest)
+    if latest:
         current_contest = int(latest["contest"])
         have = {int(draw["contest"]) for draw in cached}
-        target_contests = [n for n in range(current_contest - 1, max(0, current_contest - limit), -1) if n not in have]
+        # Retry only gaps inside the known, bounded recent contest window.
+        target_contests = [n for n in range(current_contest, max(0, current_contest - limit), -1) if n not in have]
         if target_contests:
             with ThreadPoolExecutor(max_workers=5) as pool:
                 futures = {pool.submit(fetch_draw, key, contest): contest for contest in target_contests}
@@ -60,8 +68,17 @@ def list_results(game: str, limit: int = 20, refresh_latest: bool = True) -> lis
                         storage.save_draw(future.result())
                     except Exception:
                         continue
-    results = storage.list_draws(key, limit)
-    return results or ([latest] if latest else [])
+    results = storage.list_draws_range(key, lower, current_contest)
+    # Do not fill gaps in the requested recent window with older cached rows.
+    if latest:
+        newest = int(latest.get("_known_latest_contest", latest["contest"]))
+        results = [row for row in results if newest - limit < int(row["contest"]) <= newest]
+    # Preserve the freshness warning/source attached to the latest lookup;
+    # the persisted payload intentionally does not carry transient warnings.
+    results = [latest if int(row["contest"]) == int(latest["contest"]) else row for row in results] if latest else results
+    if latest and not results:
+        raise RuntimeError("Nenhum concurso válido disponível no recorte solicitado; há lacunas no cache.")
+    return results
 
 
 def list_history_page(game: str, limit: int = 100, before: int | None = None) -> dict:
@@ -70,14 +87,19 @@ def list_history_page(game: str, limit: int = 100, before: int | None = None) ->
     key = spec["key"]
     limit = max(1, min(int(limit), 100))
     if before is not None and int(before) <= 1:
-        return {"items": [], "expected_count": 0, "missing_contests": [], "next_before": None}
+        return {"items": [], "expected_count": 0, "missing_contests": [], "next_before": None, "provenance": {"latest_lookup": "unknown", "recently_checked": False, "verified": False}, "warning": "Último concurso não consultado nesta página vazia; pode estar desatualizado."}
 
     latest = latest_result(key, refresh=True)
-    latest_contest = int(latest["contest"])
+    latest_contest = int(latest.get("_known_latest_contest", latest["contest"]))
+    source = latest.get("source")
+    checked_at = latest.get("_latest_checked_at") if not latest.get("warning") else None
+    fresh = source == "CAIXA via Cloudflare Worker" or (source == "cache" and bool(checked_at))
+    freshness_warning = latest.get("warning") or ("Último concurso obtido do cache do servidor ou de origem não informada; pode estar desatualizado." if not fresh else None)
+    provenance = {"latest_lookup": "server_fetch" if source == "CAIXA via Cloudflare Worker" else "server_cache" if source == "cache" else "unknown", "recently_checked": fresh, "verified": False, **({"last_successful_lookup_at": checked_at} if checked_at else {})}
     upper = min(latest_contest, int(before) - 1) if before is not None else latest_contest
     lower = max(1, upper - limit + 1)
     if upper < lower:
-        return {"items": [], "expected_count": 0, "missing_contests": [], "next_before": None}
+        return {"items": [], "expected_count": 0, "missing_contests": [], "next_before": None, "provenance": provenance, **({"warning": freshness_warning} if freshness_warning else {})}
 
     cached = storage.list_draws_range(key, lower, upper)
     have = {int(draw["contest"]) for draw in cached}
@@ -101,6 +123,8 @@ def list_history_page(game: str, limit: int = 100, before: int | None = None) ->
         "expected_count": upper - lower + 1,
         "missing_contests": missing_after_fetch,
         "next_before": lower if lower > 1 else None,
+        "provenance": provenance,
+        **({"warning": freshness_warning} if freshness_warning else {}),
     }
 
 
@@ -179,11 +203,14 @@ def generate_tickets(game: str, options: dict | None = None) -> list[dict]:
                     raise ValueError(f"O Mês da Sorte deve estar entre {bonus['minimum']} e {bonus['maximum']}.")
             extra["month"] = month
         elif bonus_type == "team":
-            extra["team"] = str(bonus_options.get("team", "")).strip()
+            team = bonus_options.get("team")
+            if not isinstance(team, str) or not team.strip() or len(team) > 100:
+                raise ValueError("Informe o Time do Coração para gerar um jogo completo.")
+            extra["team"] = team.strip()
         elif bonus_type == "trevos":
-            trevo_count = int(bonus_options.get("trevo_count", 2))
-            if trevo_count < bonus["minimum"] or trevo_count > bonus["maximum"]:
-                raise ValueError(f"Escolha entre {bonus['minimum']} e {bonus['maximum']} trevos.")
+            trevo_count = bonus_options.get("trevo_count", 2)
+            if type(trevo_count) is not int or trevo_count != 2:
+                raise ValueError("O gerador de +Milionária aceita apenas apostas simples: 6 dezenas e 2 trevos. Apostas múltiplas não são geradas nem conferidas.")
             extra["trevos"] = sorted(rng.sample(range(1, 7), trevo_count))
         generated.append(_ticket_summary(spec, {"numbers": chosen, **extra}, ticket_index + 1, previous))
     return generated
@@ -259,8 +286,8 @@ def simulate_tickets(game: str, tickets: list[dict], draw: dict) -> list[dict]:
             if month_hit:
                 award = award or "Mês da Sorte"
         elif spec["key"] == "timemania":
-            drawn_team = (draw.get("team") or "").casefold()
-            team_hit = bool(bonus.get("team") and drawn_team and str(bonus["team"]).casefold() == drawn_team)
+            drawn_team = " ".join((draw.get("team") or "").split()).casefold()
+            team_hit = bool(bonus.get("team") and drawn_team and " ".join(str(bonus["team"]).split()).casefold() == drawn_team)
             extra["team_hit"] = team_hit
             extra["drawn_team"] = draw.get("team")
             if team_hit:
@@ -278,6 +305,8 @@ def _validate_ticket(spec: dict, ticket: dict) -> None:
     key = spec["key"]
     bonus = ticket.get("bonus", {}) or {}
     if key == "supersete":
+        if bonus:
+            raise ValueError("Campo especial incompatível com a modalidade.")
         columns = ticket.get("columns") or [[n] for n in _int_list(ticket.get("numbers", []))]
         if len(columns) != 7:
             raise ValueError("O Super Sete precisa de sete colunas, na ordem do volante.")
@@ -293,15 +322,28 @@ def _validate_ticket(spec: dict, ticket: dict) -> None:
         raise ValueError(f"{spec['name']} aceita jogos de {spec['min_pick']} a {spec['max_pick']} dezenas nesta ferramenta.")
     if any(n < spec["minimum"] or n > spec["maximum"] for n in numbers):
         raise ValueError(f"As dezenas de {spec['name']} precisam estar no intervalo {spec['minimum']}–{spec['maximum']}.")
-    if bonus.get("month") not in (None, "") and not 1 <= int(bonus["month"]) <= 12:
-        raise ValueError("O Mês da Sorte deve estar entre 1 e 12.")
-    if key == "maismilionaria" or bonus.get("trevos"):
-        trevos = _int_list(bonus.get("trevos"))
+    allowed = {"diadesorte": {"month"}, "timemania": {"team"}, "maismilionaria": {"trevos"}}.get(key, set())
+    if set(bonus) - allowed:
+        raise ValueError("Campo especial incompatível com a modalidade.")
+    if key == "diadesorte":
+        month = bonus.get("month")
+        if type(month) is not int or not 1 <= month <= 12:
+            raise ValueError("Informe o Mês da Sorte como inteiro entre 1 e 12.")
+    if key == "timemania":
+        team = bonus.get("team")
+        if not isinstance(team, str) or not team.strip() or len(team) > 100:
+            raise ValueError("Informe o Time do Coração.")
+    if key == "maismilionaria":
+        trevos = bonus.get("trevos")
+        if not isinstance(trevos, list) or any(type(n) is not int for n in trevos):
+            raise ValueError("Informe os trevos como números inteiros.")
         bonus_spec = spec.get("bonus") or {}
         minimum = bonus_spec.get("minimum", 2)
         maximum = bonus_spec.get("maximum", 6)
         if not minimum <= len(trevos) <= maximum or len(set(trevos)) != len(trevos) or any(n < 1 or n > 6 for n in trevos):
             raise ValueError(f"Escolha de {minimum} a {maximum} trevos distintos entre 1 e 6.")
+        if key == "maismilionaria" and len(trevos) != 2:
+            raise ValueError("O simulador de +Milionária aceita apenas apostas simples: 6 dezenas e 2 trevos. Apostas múltiplas não são conferidas.")
 
 
 def _award(spec: dict, hits: int) -> str | None:
@@ -319,7 +361,7 @@ def _million_award(main_hits: int, trevo_hits: int) -> str | None:
         (5, 2): "5 acertos + 2 trevos", (5, 1): "5 acertos + 1 trevo", (5, 0): "5 acertos",
         (4, 2): "4 acertos + 2 trevos", (4, 1): "4 acertos + 1 trevo", (4, 0): "4 acertos",
         (3, 2): "3 acertos + 2 trevos", (3, 1): "3 acertos + 1 trevo",
-        (2, 2): "2 acertos + 2 trevos",
+        (2, 2): "2 acertos + 2 trevos", (2, 1): "2 acertos + 1 trevo",
     }
     return tiers.get((main_hits, trevo_hits))
 

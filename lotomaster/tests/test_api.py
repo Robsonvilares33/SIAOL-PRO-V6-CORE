@@ -94,7 +94,7 @@ class LotomasterApiTests(unittest.TestCase):
         with patch("lotomaster.api.list_history_page", return_value=page) as load:
             response = self.client.get("/api/v1/lotomania/history?limit=1&before=101")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["source"], "CAIXA via Cloudflare Worker")
+        self.assertEqual(response.json()["source"], "CAIXA via Worker e cache do servidor")
         self.assertEqual(response.json()["next_before"], 100)
         load.assert_called_once_with("lotomania", limit=1, before=101)
 

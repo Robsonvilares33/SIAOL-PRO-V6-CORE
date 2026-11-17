@@ -4,6 +4,7 @@ from itertools import combinations
 import math
 
 from .catalog import get_spec, get_stats
+from .validation import validate_draws
 
 
 def _is_prime(n: int) -> bool:
@@ -30,12 +31,13 @@ def _number_values(draw: dict, key: str) -> list[int]:
 def analyze_draws(game: str, draws: list[dict]) -> dict:
     spec = get_spec(game)
     key = spec["key"]
-    ordered_draws = sorted(draws or [], key=lambda d: int(d.get("contest", 0)), reverse=True)
+    ordered_draws = sorted(validate_draws(key, draws), key=lambda d: d["contest"], reverse=True)
     n_draws = len(ordered_draws)
     low, high = spec["minimum"], spec["maximum"]
     pool = list(range(low, high + 1))
     all_numbers = [_number_values(d, key) for d in ordered_draws]
-    counts = Counter(n for row in all_numbers for n in row)
+    # Super Sete can repeat a digit in different columns; frequency is per draw.
+    counts = Counter(n for row in all_numbers for n in set(row))
     denominator = max(n_draws, 1)
     frequency = []
     gaps = []
@@ -108,7 +110,7 @@ def analyze_draws(game: str, draws: list[dict]) -> dict:
     latest = ordered_draws[0] if ordered_draws else None
     previous_repeats = len(set(all_numbers[0]) & set(all_numbers[1])) if len(all_numbers) > 1 else 0
     cycle = _cycle_progress(pool, all_numbers)
-    total_appearances = sum(counts.values()) or 1
+    total_appearances = sum(counts.values())
     pareto_target = total_appearances * 0.8
     pareto_numbers = []
     cumulative = 0
@@ -153,10 +155,10 @@ def analyze_draws(game: str, draws: list[dict]) -> dict:
         elif stat_id == "second-draw":
             second_rows = [d.get("second_numbers", []) for d in ordered_draws if d.get("second_numbers")]
             second_counts = Counter(n for row in second_rows for n in row)
-            tables[stat_id] = {"title": stat_label, "data": {"draws_analyzed": len(second_rows), "frequency": [{"number": n, "count": second_counts[n]} for n in sorted(second_counts)], "most_frequent": [{"number": n, "count": c} for n, c in second_counts.most_common(15)], "note": "Calculada separadamente a partir das dezenas do segundo sorteio oficial."}}
+            tables[stat_id] = {"title": stat_label, "data": {"draws_analyzed": len(second_rows), "frequency": [{"number": n, "count": second_counts[n]} for n in sorted(second_counts)], "most_frequent": [{"number": n, "count": c} for n, c in second_counts.most_common(15)], "note": "Calculada separadamente a partir das dezenas do segundo sorteio informado; a origem não é verificada por esta análise."}}
         elif stat_id in {"independencia", "special-draw", "quina-sao-joao", "easter"}:
             marked = [d for d in ordered_draws if d.get("special_draw")]
-            tables[stat_id] = {"title": stat_label, "data": {"officially_marked_special_draws": len(marked), "contests": [d.get("contest") for d in marked], "note": "Usa o indicador público de concurso especial retornado pela CAIXA; a classificação por evento pode variar."}}
+            tables[stat_id] = {"title": stat_label, "data": {"marked_special_draws": len(marked), "contests": [d.get("contest") for d in marked], "note": "Usa o indicador de concurso especial informado nos dados; a origem não é verificada e a classificação por evento pode variar."}}
         elif stat_id in {"final-zero", "final-five"}:
             divisor = 10 if stat_id == "final-zero" else 5
             selected = [d for d in ordered_draws if int(d.get("contest", 0)) % divisor == 0]
@@ -314,7 +316,7 @@ def _special_distribution(key: str, draws: list[dict]) -> dict:
         result["team_gaps"] = {"items": sorted(gaps, key=lambda row: (-row["draws_since_hit"], row["team"]))[:20]}
     if key == "maismilionaria":
         result["trevos"] = {"counts": [{"trevo": n, "count": trevos[n]} for n in range(1, 7)], "pairs": [{"trevos": list(pair), "count": count} for pair, count in trevo_pairs.most_common()]}
-        result["trevo_order"] = {"orders": [{"first": order[0], "second": order[1], "count": count} for order, count in trevo_orders.most_common()], "note": "Ordem extraída da sequência oficial quando os oito valores são informados."}
+        result["trevo_order"] = {"orders": [{"first": order[0], "second": order[1], "count": count} for order, count in trevo_orders.most_common()], "note": "Ordem extraída da sequência informada quando os oito valores são fornecidos; caso contrário, usa a ordem dos trevos informados. A origem não é verificada por esta análise."}
     if key == "supersete":
         result["columns"] = _column_frequency([d.get("numbers", []) for d in draws])
     return result

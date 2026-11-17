@@ -84,7 +84,7 @@ def _gemini_commentary(spec: dict, analysis: dict, local_commentary: str) -> tup
         return local_commentary, model, "temporarily_unavailable"
 
 
-def build_assistant_report(game: str, draws: list[dict], use_gemini: bool = True) -> dict:
+def build_assistant_report(game: str, draws: list[dict], use_gemini: bool = False) -> dict:
     spec = get_spec(game)
     analysis = analyze_draws(spec["key"], draws)
     local_commentary = _local_commentary(spec, analysis)

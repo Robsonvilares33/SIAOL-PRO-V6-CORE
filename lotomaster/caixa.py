@@ -4,6 +4,7 @@ import os
 import requests
 
 from .catalog import get_spec
+from .validation import validate_draw
 
 BASE_URL = os.getenv(
     "LOTOMASTER_CAIXA_PROXY_URL",
@@ -21,26 +22,45 @@ MONTHS = {
 
 
 def _integers(values):
+    if values is None:
+        return []
+    if not isinstance(values, list) or len(values) > 20:
+        raise ValueError("Lista de dezenas inválida ou excessiva.")
     result = []
-    for value in values or []:
-        try:
-            result.append(int(str(value).strip()))
-        except (TypeError, ValueError):
-            continue
+    for value in values:
+        if type(value) is int:
+            result.append(value)
+        elif isinstance(value, str) and 1 <= len(value.strip()) <= 3 and value.strip().isascii() and value.strip().isdigit():
+            result.append(int(value.strip()))
+        else:
+            raise ValueError("Dezena inválida na resposta da CAIXA.")
     return result
 
 
 def _clean_text(value):
     if value is None:
         return None
-    cleaned = "".join(ch for ch in str(value) if ch.isprintable()).strip()
+    cleaned = " ".join("".join(" " if ch.isspace() else ch if ch.isprintable() else "" for ch in str(value)).split())
     return cleaned or None
 
 
 def normalize_draw(game: str, data: dict) -> dict:
     spec = get_spec(game)
     key = spec["key"]
-    numbers = _integers(data.get("listaDezenas") or data.get("dezenasSorteadasOrdemSorteio"))
+    if not isinstance(data, dict):
+        raise ValueError("Resposta da CAIXA inválida.")
+    raw_contest = data.get("numero")
+    if type(raw_contest) is int:
+        contest = raw_contest
+    elif isinstance(raw_contest, str) and raw_contest.isascii() and raw_contest.isdigit() and len(raw_contest) <= 10:
+        contest = int(raw_contest)
+    else:
+        raise ValueError("Número de concurso inválido.")
+    main = data.get("listaDezenas")
+    numbers = _integers(main if main is not None else data.get("dezenasSorteadasOrdemSorteio"))
+    combined_trevos = numbers[6:] if key == "maismilionaria" and len(numbers) == 8 else []
+    if (main is None and key in {"duplasena", "maismilionaria"}) or combined_trevos:
+        numbers = numbers[:spec["draw_size"]]
     if key != "supersete":
         numbers = sorted(numbers)
     ordered = _integers(data.get("dezenasSorteadasOrdemSorteio"))
@@ -49,8 +69,12 @@ def normalize_draw(game: str, data: dict) -> dict:
         second = ordered[6:12]
     raw_bonus = data.get("trevosSorteados") or []
     trevos = _integers(raw_bonus)
-    if key == "maismilionaria" and not trevos and len(ordered) >= 8:
-        trevos = ordered[-2:]
+    if key == "maismilionaria":
+        candidates = [x for x in (combined_trevos, ordered[6:] if len(ordered) == 8 else [], trevos) if x]
+        if candidates and any(sorted(x) != sorted(candidates[0]) for x in candidates[1:]):
+            raise ValueError("Trevos contraditórios na resposta.")
+        if not trevos:
+            trevos = ordered[6:] if len(ordered) == 8 else combined_trevos
     month_name = None
     month_number = None
     team = None
@@ -64,8 +88,17 @@ def normalize_draw(game: str, data: dict) -> dict:
     special_value = str(data.get("indicadorConcursoEspecial", "")).strip().casefold()
     is_special_draw = special_value in {"true", "1", "s", "sim"}
     contest_type = _clean_text(data.get("tipoJogo"))
+    validate_draw(key, {
+        "game": key, "contest": contest, "numbers": numbers,
+        "ordered_numbers": ordered or numbers, "second_numbers": second,
+        "trevos": trevos, "month": {"name": month_name, "number": month_number} if month_name else None,
+        "team": team, "special_draw": is_special_draw,
+    }, require_game=True, require_special=True)
     awards = []
-    for item in data.get("listaRateioPremio") or []:
+    raw_awards = data.get("listaRateioPremio") or []
+    if not isinstance(raw_awards, list) or len(raw_awards) > 50:
+        raise ValueError("Lista de rateios inválida ou excessiva.")
+    for item in raw_awards:
         awards.append({
             "label": _clean_text(item.get("descricaoFaixa")) or "Faixa",
             "winners": int(item.get("numeroDeGanhadores") or 0),
@@ -76,7 +109,7 @@ def normalize_draw(game: str, data: dict) -> dict:
     return {
         "game": key,
         "name": spec["name"],
-        "contest": int(data.get("numero") or 0),
+        "contest": contest,
         "draw_date": draw_date,
         "next_draw_date": next_date,
         "numbers": numbers,

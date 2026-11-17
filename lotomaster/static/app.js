@@ -17,6 +17,11 @@ function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 }
 function spec() { return state.catalog.find(item => item.key === state.game) || state.catalog[0]; }
+function probabilityEvent(item, probability) {
+  return item.key === 'diadesorte'
+    ? 'Acertar as 7 dezenas sorteadas e o Mês da Sorte'
+    : probability.event;
+}
 function padNum(n, digits=(spec()?.digits || 2)) { return String(n).padStart(digits, '0'); }
 function balls(nums, special=false, digits=(spec()?.digits || 2)) {
   if (!Array.isArray(nums) || !nums.length) return '<span class="small-note">Sem dezenas</span>';
@@ -76,7 +81,7 @@ function resultCard(draw, item=spec()) {
   if (draw.team) extras.push(`<div class="result-extras">Time do Coração: <b>${esc(draw.team)}</b></div>`);
   const awardCount = (draw.winners_by_tier||[]).reduce((sum,row)=>sum+Number(row.winners||0),0);
   return `<div class="card result-card">
-    <div class="card-head"><div><h2 class="card-title">${esc(item.name)} · concurso ${esc(draw.contest)}</h2><div class="result-meta">${esc(draw.draw_date||'Data não informada')} · ${esc(draw.source||draw.location||'Portal da CAIXA')}</div></div><span class="pill ${draw.accumulated?'pill-warm':'pill-muted'}">${draw.accumulated?'Acumulado':'Apurado'}</span></div>
+    <div class="card-head"><div><h2 class="card-title">${esc(item.name)} · concurso ${esc(draw.contest)}</h2><div class="result-meta">${esc(draw.draw_date||'Data não informada')} · ${esc(draw.source||'Origem não informada')}</div></div><span class="pill ${draw.accumulated?'pill-warm':'pill-muted'}">${draw.accumulated?'Acumulado':'Apurado'}</span></div>
     <div class="ball-row">${balls(draw.numbers,false,item.digits)}</div>
     ${extras.join('')}
     <div class="result-kpis"><span>Prêmio estimado<b>${esc(money(draw.estimated_prize))}</b></span><span>Próximo acumulado<b>${esc(money(draw.next_prize))}</b></span><span>Ganhadores em faixas<b>${esc(awardCount.toLocaleString('pt-BR'))}</b></span></div>
@@ -114,13 +119,13 @@ async function renderOverview(version=renderVersion) {
   if (version!==renderVersion || state.page!=='overview') return;
   const active = rows.find(row=>row.item.key===state.game);
   const successful = rows.filter(row=>row.data);
-  const cards = successful.map(row=>`<div class="card"><div class="card-head"><div><h3 class="card-title">${esc(row.item.name)}</h3><div class="card-subtitle">Concurso ${esc(row.data.contest)} · ${esc(row.data.draw_date||'')}</div></div><span class="pill ${row.data.accumulated?'pill-warm':''}">${row.data.accumulated?'Acumulado':'Resultado'}</span></div><div class="ball-row">${balls(row.data.numbers,false,row.item.digits)}${row.data.trevos?.length?balls(row.data.trevos,true,2):''}</div><button class="button button-quiet" data-game="${esc(row.item.key)}" data-page="results">Ver histórico</button></div>`).join('');
+  const cards = successful.map(row=>`<div class="card"><div class="card-head"><div><h3 class="card-title">${esc(row.item.name)}</h3><div class="card-subtitle">Concurso ${esc(row.data.contest)} · ${esc(row.data.draw_date||'')}${row.data.warning?` · ${esc(row.data.warning)} · cache possivelmente desatualizado`:''}</div></div><span class="pill ${row.data.accumulated?'pill-warm':''}">${row.data.accumulated?'Acumulado':'Resultado'}</span></div><div class="ball-row">${balls(row.data.numbers,false,row.item.digits)}${row.data.trevos?.length?balls(row.data.trevos,true,2):''}</div><button class="button button-quiet" data-game="${esc(row.item.key)}" data-page="results">Ver histórico</button></div>`).join('');
   const failed = rows.filter(row=>row.error);
   $('#main-content').innerHTML = `${pageHeader('Painel de concursos','Resultados e estatísticas','Consulte os últimos concursos oficiais e abra as ferramentas disponíveis para cada modalidade.',`<button class="button button-primary" data-page="generator">✦ Gerar jogos</button>`)}
     <div class="grid grid-2" style="margin-bottom:16px">${active?.data?resultCard(active.data,active.item):`<div class="card">${errorBlock(active?.error?.message||'Resultado indisponível.')}</div>`}
       <div class="grid" style="align-content:start"><div class="grid grid-2"><div class="card kpi"><div class="kpi-top"><span>Modalidades disponíveis</span><span class="kpi-icon">▦</span></div><div class="kpi-value">${state.catalog.length}</div><div class="kpi-foot">Loterias oficiais da CAIXA</div></div><div class="card kpi"><div class="kpi-top"><span>Fonte de resultados</span><span class="kpi-icon">↻</span></div><div class="kpi-value" style="font-size:16px">CAIXA</div><div class="kpi-foot">API oficial via Worker; cache local</div></div></div>
       <div class="card"><div class="card-head"><div><h2 class="card-title">Atalhos da modalidade</h2><div class="card-subtitle">Ferramentas correspondentes às páginas públicas da referência</div></div></div><div class="form-actions"><button class="button" data-page="generator">Gerador</button><button class="button" data-page="simulator">Conferir jogos</button><button class="button" data-page="results">Resultados</button><button class="button" data-page="statistics">Estatísticas</button></div></div></div>
-    </div><div class="card"><div class="card-head"><div><h2 class="card-title">Resultados recentes por modalidade</h2><div class="card-subtitle">API pública da CAIXA via Worker de leitura</div></div><span class="pill">${successful.length} de ${state.catalog.length} disponíveis</span></div><div class="grid grid-3">${cards||'<div class="empty-state">Nenhum resultado retornado.</div>'}</div>${failed.length?`<div class="small-note" style="margin-top:12px">Temporariamente indisponíveis: ${failed.map(row=>esc(row.item.name)).join(', ')}.</div>`:''}</div>
+    </div><div class="card"><div class="card-head"><div><h2 class="card-title">Resultados recentes por modalidade</h2><div class="card-subtitle">Consulta via Worker e cache; resultados podem estar desatualizados.</div></div><span class="pill">${successful.length} de ${state.catalog.length} disponíveis</span></div><div class="grid grid-3">${cards||'<div class="empty-state">Nenhum resultado retornado.</div>'}</div>${failed.length?`<div class="small-note" style="margin-top:12px">Temporariamente indisponíveis: ${failed.map(row=>esc(row.item.name)).join(', ')}.</div>`:''}</div>
     <div class="notice"><span>ⓘ</span><span><strong>Como interpretar:</strong> frequência, atraso e padrões são descrições de sorteios passados. Cada novo concurso é aleatório e independente; essas métricas não aumentam a probabilidade de um jogo ser sorteado.</span></div>`;
 }
 
@@ -135,8 +140,8 @@ function superSeteGrid() {
 function bonusFields(item) {
   if (!item.bonus) return '';
   if (item.bonus.type==='month') return `<div class="field"><label for="bonus-month">Mês da Sorte</label><select id="bonus-month"><option value="">Aleatório</option>${months.map((m,i)=>`<option value="${i+1}">${m}</option>`).join('')}</select></div>`;
-  if (item.bonus.type==='team') return `<div class="field"><label for="bonus-team">Time do Coração</label><input id="bonus-team" placeholder="Informe o time para testar" maxlength="80"><span class="field-help">A CAIXA informa o time sorteado no resultado.</span></div>`;
-  if (item.bonus.type==='trevos') return `<div class="field"><label for="trevo-count">Quantidade de trevos</label><select id="trevo-count">${Array.from({length:5},(_,i)=>`<option value="${i+2}" ${i===0?'selected':''}>${i+2} trevos</option>`).join('')}</select></div>`;
+  if (item.bonus.type==='team') return `<div class="field"><label for="bonus-team">Time do Coração</label><input id="bonus-team" placeholder="Informe o time para testar" maxlength="80"><span class="field-help">Informe o Time do Coração para gerar um jogo completo e poder conferi-lo.</span></div>`;
+  if (item.bonus.type==='trevos') return `<div class="field"><label for="trevo-count">Quantidade de trevos</label><select id="trevo-count"><option value="2">2 trevos</option></select><span class="field-help">Apenas aposta simples: 6 dezenas e 2 trevos. Apostas múltiplas não são geradas nem conferidas.</span></div>`;
   return '';
 }
 function filtersFields() {
@@ -157,19 +162,19 @@ function parseNumberLines(raw) {
 async function renderSimulator() {
   const item=spec();
   const example=item.key==='supersete'?'3 0 6 6 0 5 4':item.key==='lotofacil'?'01 03 04 06 07 08 09 10 11 13 15 17 19 22 25':Array.from({length:item.pick_size},(_,i)=>padNum(item.range.minimum+i)).join(' ');
-  const bonusInput=item.bonus?.type==='month'?`<div class="field"><label for="sim-month">Mês da Sorte</label><select id="sim-month"><option value="">Não informado</option>${months.map((m,i)=>`<option value="${i+1}" ${Number(state.simulatorBonus?.month)===i+1?'selected':''}>${m}</option>`).join('')}</select></div>`:item.bonus?.type==='team'?`<div class="field"><label for="sim-team">Time do Coração</label><input id="sim-team" placeholder="Nome do time" value="${esc(state.simulatorBonus?.team||'')}"></div>`:item.bonus?.type==='trevos'?`<div class="field"><label for="sim-trevos">Trevos marcados</label><input id="sim-trevos" placeholder="Ex.: 2, 5" value="${esc((state.simulatorBonus?.trevos||[]).join(', '))}"></div>`:'';
-  $('#main-content').innerHTML = `${pageHeader('Conferência · '+item.name,'Simulador de jogos',`Compare um ou mais jogos com o resultado oficial mais recente de ${item.name}.`)}
-    <div class="grid grid-2"><form id="simulate-form" class="card"><div class="card-head"><div><h2 class="card-title">Seus jogos</h2><div class="card-subtitle">Um jogo por linha; separe as dezenas com espaço, vírgula ou ponto e vírgula.</div></div></div><div class="field"><label for="sim-numbers">Dezenas selecionadas</label><textarea id="sim-numbers" placeholder="${esc(example)}">${esc(state.simulatorText||'')}</textarea><span class="field-help">${item.key==='supersete'?'Informe 7 dígitos em ordem de coluna.':'Você pode colar vários jogos, um por linha.'}</span></div><div class="form-grid" style="margin-top:10px">${bonusInput}</div><div class="form-actions"><button class="button button-primary" type="submit">✓ Conferir com o último resultado</button><button class="button" type="button" data-page="results">Abrir histórico</button></div></form><div class="card"><div class="card-head"><div><h2 class="card-title">Como funciona</h2><div class="card-subtitle">Conferência local contra o concurso oficial consultado</div></div></div><div class="metric-list"><div class="draw-row"><div class="draw-row-main"><div class="draw-title">1 · Insira seu jogo</div><div class="draw-caption">Use dezenas do intervalo mostrado pela modalidade.</div></div></div><div class="draw-row"><div class="draw-row-main"><div class="draw-title">2 · Compare acertos</div><div class="draw-caption">O sistema informa a quantidade e faixas de acerto.</div></div></div><div class="draw-row"><div class="draw-row-main"><div class="draw-title">3 · Confira na CAIXA</div><div class="draw-caption">A confirmação final de prêmios deve ser feita no portal oficial.</div></div></div></div><div id="sim-result" style="margin-top:14px"></div></div></div>`;
+  const bonusInput=item.bonus?.type==='month'?`<div class="field"><label for="sim-month">Mês da Sorte</label><select id="sim-month"><option value="">Não informado</option>${months.map((m,i)=>`<option value="${i+1}" ${Number(state.simulatorBonus?.month)===i+1?'selected':''}>${m}</option>`).join('')}</select></div>`:item.bonus?.type==='team'?`<div class="field"><label for="sim-team">Time do Coração</label><input id="sim-team" placeholder="Nome do time" value="${esc(state.simulatorBonus?.team||'')}"></div>`:item.bonus?.type==='trevos'?`<div class="field"><label for="sim-trevos">Trevos marcados</label><input id="sim-trevos" placeholder="Ex.: 2, 5" value="${esc((state.simulatorBonus?.trevos||[]).join(', '))}"><span class="field-help">Só apostas simples (6 dezenas e 2 trevos). Jogos gerados mantêm seus trevos individuais; alterar este campo aplica os trevos a todos os jogos.</span></div>`:'';
+  $('#main-content').innerHTML = `${pageHeader('Conferência · '+item.name,'Simulador de jogos',`Compare jogos com o resultado disponível de ${item.name}; confirme o concurso e os prêmios na CAIXA.`)}
+    <div class="grid grid-2"><form id="simulate-form" class="card"><div class="card-head"><div><h2 class="card-title">Seus jogos</h2><div class="card-subtitle">Um jogo por linha; separe as dezenas com espaço, vírgula ou ponto e vírgula.</div></div></div><div class="field"><label for="sim-numbers">Dezenas selecionadas</label><textarea id="sim-numbers" placeholder="${esc(example)}">${esc(state.simulatorText||'')}</textarea><span class="field-help">${item.key==='supersete'?'Informe 7 dígitos em ordem de coluna.':'Você pode colar vários jogos, um por linha.'}</span></div><div class="form-grid" style="margin-top:10px">${bonusInput}</div><div class="form-actions"><button class="button button-primary" type="submit">✓ Conferir com o último resultado</button><button class="button" type="button" data-page="results">Abrir histórico</button></div></form><div class="card"><div class="card-head"><div><h2 class="card-title">Como funciona</h2><div class="card-subtitle">Conferência informativa contra o resultado disponível</div></div></div><div class="metric-list"><div class="draw-row"><div class="draw-row-main"><div class="draw-title">1 · Insira seu jogo</div><div class="draw-caption">Use dezenas do intervalo mostrado pela modalidade.</div></div></div><div class="draw-row"><div class="draw-row-main"><div class="draw-title">2 · Compare acertos</div><div class="draw-caption">O sistema informa a quantidade e faixas de acerto.</div></div></div><div class="draw-row"><div class="draw-row-main"><div class="draw-title">3 · Confira na CAIXA</div><div class="draw-caption">A confirmação final de prêmios deve ser feita no portal oficial.</div></div></div></div><div id="sim-result" style="margin-top:14px"></div></div></div>`;
 }
 async function renderResults() {
   const item=spec(); const version=renderVersion;
-  $('#main-content').innerHTML = `${pageHeader('Histórico · '+item.name,'Resultados dos sorteios',`Concursos oficiais de ${item.name}, com ordenação do mais recente para o mais antigo.`,`<a class="button" href="${API}/${item.key}/export.csv?limit=100">↓ Exportar CSV</a><a class="button" href="${API}/${item.key}/export.txt?limit=100">↓ Exportar TXT</a>`)}<div class="card"><div class="card-head"><div><h2 class="card-title">Histórico recente</h2><div class="card-subtitle">Até 30 concursos · dados consultados e armazenados em cache local</div></div><span id="history-count" class="pill">Consultando…</span></div><div id="history-table"><div class="loading-block"><span class="spinner"></span>Buscando concursos recentes...</div></div></div>`;
+  $('#main-content').innerHTML = `${pageHeader('Histórico · '+item.name,'Resultados dos sorteios',`Concursos de ${item.name} consultados via Worker e/ou cache, sem verificação independente, do mais recente para o mais antigo.`,`<a class="button" href="${API}/${item.key}/export.csv?limit=100">↓ Exportar CSV</a><a class="button" href="${API}/${item.key}/export.txt?limit=100">↓ Exportar TXT</a>`)}<div class="card"><div class="card-head"><div><h2 class="card-title">Histórico recente</h2><div class="card-subtitle">Até 30 concursos · dados consultados e armazenados em cache local</div></div><span id="history-count" class="pill">Consultando…</span></div><div id="history-table"><div class="loading-block"><span class="spinner"></span>Buscando concursos recentes...</div></div></div>`;
   try {
     const data=await api(`/${item.key}/results?limit=30`);
     if (version!==renderVersion || state.page!=='results' || state.game!==item.key) return;
     $('#history-count').textContent=`${data.count} concursos`;
     const rows=data.items.map(draw=>`<tr><td class="table-number">${esc(draw.contest)}</td><td>${esc(draw.draw_date||'')}</td><td>${balls(draw.numbers)} ${draw.second_numbers?.length?`<div class="small-note">2º sorteio: ${draw.second_numbers.map(n=>padNum(n,item.digits)).join(' · ')}</div>`:''}</td><td>${draw.trevos?.length?balls(draw.trevos,true):draw.month?.name?esc(draw.month.name):draw.team?esc(draw.team):'—'}</td><td>${draw.accumulated?'<span class="pill pill-warm">Acumulado</span>':'—'}</td><td>${esc(money(draw.estimated_prize))}</td></tr>`).join('');
-    $('#history-table').innerHTML=rows?`<div class="table-wrap"><table><thead><tr><th>Concurso</th><th>Data</th><th>Dezenas sorteadas</th><th>Complemento</th><th>Status</th><th>Próximo prêmio</th></tr></thead><tbody>${rows}</tbody></table></div>`:'<div class="empty-state">Não foram retornados concursos.</div>';
+    $('#history-table').innerHTML=(data.warning?`<div class="notice notice-warning">${esc(data.warning)} · confirme a atualização na CAIXA.</div>`:'')+(data.partial?`<div class="notice notice-warning">Histórico parcial: ${esc(data.count)} de ${esc(data.expected_count)} concursos disponíveis.</div>`:'')+(rows?`<div class="table-wrap"><table><thead><tr><th>Concurso</th><th>Data</th><th>Dezenas sorteadas</th><th>Complemento</th><th>Status</th><th>Próximo prêmio</th></tr></thead><tbody>${rows}</tbody></table></div>`:'<div class="empty-state">Não foram retornados concursos.</div>');
   } catch(error) { $('#history-table').innerHTML=errorBlock(error.message); $('#history-count').textContent='Sem conexão'; }
 }
 function renderValue(value) {
@@ -207,6 +212,7 @@ async function loadSelectedStat() {
     if (version!==renderVersion || state.page!=='statistics' || state.game!==item.key) return;
     state.statsPayload=data;
     $('#stats-count').textContent=`${data.draws_analyzed} concursos`;
+    setNotice([data.warning, data.partial?'Amostra parcial: nem todos os concursos solicitados estão disponíveis.':''].filter(Boolean).join(' '), 'warning');
     $('#stats-highlights').innerHTML=`<div class="stats-highlight"><div class="mini-stat"><small>Números analisados</small><b>${esc(data.draws_analyzed)}</b></div><div class="mini-stat"><small>Concurso mais recente</small><b>${esc(data.latest_contest||'—')}</b></div><div class="mini-stat"><small>Repetidas do anterior</small><b>${esc(data.repeated_from_previous)}</b></div><div class="mini-stat"><small>Soma mais recente</small><b>${esc(data.sum?.latest??'—')}</b></div></div>`;
     const id=$('#stat-picker').value; state.statId=id;
     const table=data.tables?.[id];
@@ -215,21 +221,25 @@ async function loadSelectedStat() {
 }
 async function renderAssistant() {
   const item=spec(); const version=renderVersion;
-  $('#main-content').innerHTML=`${pageHeader('Análise exploratória · '+item.name,'Assistente analítico',`Conecte sua API pessoal para analisar resultados públicos e, se quiser, gerar uma combinação experimental.`)}${window.LotoMasterAI.configMarkup()}<div class="notice notice-warning"><span>ⓘ</span><span>A análise é retrospectiva e não prevê resultados. Concursos futuros só podem ser lidos depois de publicados pela CAIXA; a página verifica atualizações enquanto permanece aberta. O gerador uniforme permanece inalterado.</span></div><form id="ai-analysis-form" class="card"><div class="card-head"><div><h2 class="card-title">Ler resultados oficiais e analisar</h2><div class="card-subtitle">O envio à API pessoal só ocorre depois do seu comando e consentimento.</div></div><span id="assistant-status" class="pill pill-muted">Aguardando</span></div><div class="ai-analysis-controls"><div class="field"><label for="ai-history-mode">Período histórico</label><select id="ai-history-mode"><option value="all" selected>Todo o histórico disponível (desde o concurso 1)</option><option value="300">Últimos 300 concursos</option><option value="50">Últimos 50 concursos</option></select></div><button class="button button-primary" type="submit">Analisar com minha IA</button></div><label class="ai-consent"><input id="ai-consent" type="checkbox"><span>Autorizo enviar ao provedor escolhido os resultados públicos da CAIXA e as estatísticas deste recorte para a análise solicitada.</span></label><label class="ai-partial"><input id="ai-allow-partial" type="checkbox"><span>Se alguns concursos estiverem indisponíveis, aceito uma análise parcial claramente identificada.</span></label><div class="small-note ai-progress" id="ai-progress">O histórico completo é carregado em páginas de até 100 concursos. O arquivo atualmente suporta até 5.000 concursos por análise.</div><div id="assistant-content"><div class="empty-state">Configure uma API, marque o consentimento e solicite uma análise.</div></div></form><div class="card" style="margin-top:16px"><div class="card-head"><div><h2 class="card-title">Gerador uniforme (baseline)</h2><div class="card-subtitle">Esta combinação é aleatória e independente da análise histórica; cada jogo legal conserva suas chances teóricas.</div></div></div><div class="form-actions"><button class="button button-primary" data-action="assistant-generate">Montar combinação aleatória</button></div><div id="assistant-ticket"></div></div>`;
+  $('#main-content').innerHTML=`${pageHeader('Análise exploratória · '+item.name,'Assistente analítico',`Conecte sua API pessoal para analisar resultados públicos e, se quiser, gerar uma combinação experimental.`)}${window.LotoMasterAI.configMarkup()}<div class="notice notice-warning"><span>ⓘ</span><span>A análise é retrospectiva e não prevê resultados. Concursos futuros só podem ser lidos depois de publicados pela CAIXA; a página verifica atualizações enquanto permanece aberta. O gerador uniforme permanece inalterado.</span></div><form id="ai-analysis-form" class="card"><div class="card-head"><div><h2 class="card-title">Ler resultados oficiais e analisar</h2><div class="card-subtitle">O envio à API pessoal só ocorre depois do seu comando e consentimento.</div></div><span id="assistant-status" class="pill pill-muted">Aguardando</span></div><div class="ai-analysis-controls"><div class="field"><label for="ai-history-mode">Período histórico</label><select id="ai-history-mode"><option value="all" selected>Até os 500 concursos mais recentes</option><option value="300">Últimos 300 concursos</option><option value="50">Últimos 50 concursos</option></select></div><button class="button button-primary" type="submit">Analisar com minha IA</button></div><label class="ai-consent"><input id="ai-consent" type="checkbox"><span>Autorizo enviar ao provedor escolhido os resultados públicos da CAIXA e as estatísticas deste recorte para a análise solicitada.</span></label><label class="ai-partial"><input id="ai-allow-partial" type="checkbox"><span>Se alguns concursos estiverem indisponíveis, aceito uma análise parcial claramente identificada.</span></label><div class="small-note ai-progress" id="ai-progress">O recorte é carregado em páginas de até 100 concursos, com limite de 500 por análise. Se houver mais concursos, os anteriores ficarão de fora.</div><div id="assistant-content"><div class="empty-state">Configure uma API, marque o consentimento e solicite uma análise.</div></div></form><div class="card" style="margin-top:16px"><div class="card-head"><div><h2 class="card-title">Gerador uniforme (baseline)</h2><div class="card-subtitle">Esta combinação é aleatória e independente da análise histórica; cada jogo legal conserva suas chances teóricas.</div></div></div>${item.key==='timemania'?'<div class="field"><label for="assistant-team">Time do Coração</label><input id="assistant-team" maxlength="100" required placeholder="Informe seu time"></div>':''}<div class="form-actions"><button class="button button-primary" data-action="assistant-generate">Montar combinação aleatória</button></div><div id="assistant-ticket"></div></div>`;
   if (version!==renderVersion || state.page!=='assistant') return;
   window.LotoMasterAI.bindConfigControls();
 }
 
 async function fetchAssistantHistory(item, mode, progress) {
   if (mode!=='all') {
+    if (!['50','300'].includes(mode)) throw new Error('Recorte histórico inválido.');
     const limit=Number(mode);
     const page=await api(`/${item.key}/results?limit=${limit}`);
-    return {draws:page.items||[],missingCount:0,complete:false,expectedCount:page.count||0,periodLabel:`Recorte dos últimos ${page.count||limit} concursos`};
+    const warning=page.warning || (page.provenance?.recently_checked===true ? null : "Atualização do último concurso não foi verificada nesta consulta; o histórico pode estar desatualizado.");
+    return {draws:page.items||[],warning,missingCount:page.partial?Math.max(0,(page.expected_count||0)-(page.count||0)):0,complete:!page.partial && !warning && page.provenance?.recently_checked===true && (page.items||[]).some(draw=>draw.contest===1),expectedCount:page.expected_count||page.count||0,periodLabel:`Recorte dos últimos ${page.count||limit} concursos${(page.items||[]).some(draw=>draw.contest===1)?'':' · histórico anterior não incluído'}`};
   }
-  const byContest=new Map(); const missing=new Set(); let before=null; let pages=0; let hasMore=true;
-  while (hasMore && pages<50) {
+  const byContest=new Map(); const missing=new Set(); let before=null; let pages=0; let hasMore=true; let warning=null; let recentlyChecked=true;
+  while (hasMore && pages<5) {
     const cursor=before===null?'':`&before=${encodeURIComponent(before)}`;
     const page=await api(`/${item.key}/history?limit=100${cursor}`);
+    if (page.warning) warning=page.warning;
+    if (page.provenance?.recently_checked!==true) { recentlyChecked=false; warning ||= "Atualização do último concurso não foi verificada nesta consulta; o histórico pode estar desatualizado."; }
     (page.items||[]).forEach(draw=>byContest.set(Number(draw.contest),draw));
     (page.missing_contests||[]).forEach(contest=>missing.add(Number(contest)));
     pages++;
@@ -242,9 +252,8 @@ async function fetchAssistantHistory(item, mode, progress) {
       before=next;
     }
   }
-  if (hasMore) throw new Error('O histórico excede o limite de 5.000 concursos desta análise. Selecione um recorte menor.');
   const draws=[...byContest.values()].sort((a,b)=>Number(b.contest)-Number(a.contest));
-  return {draws,missingCount:missing.size,complete:missing.size===0,expectedCount:draws.length+missing.size,periodLabel:'Histórico completo disponível'};
+  return {draws,warning,missingCount:missing.size,complete:!hasMore && missing.size===0 && !warning && recentlyChecked,expectedCount:draws.length+missing.size,periodLabel:hasMore?'Recorte dos até 500 concursos mais recentes · histórico anterior não incluído':'Histórico desde o concurso 1'};
 }
 
 function renderAssistantAnalysis(result, item, draws, completeness, stats) {
@@ -252,8 +261,9 @@ function renderAssistantAnalysis(result, item, draws, completeness, stats) {
   const observations=(result.observations||[]).map(text=>`<li>${esc(text)}</li>`).join('');
   const candidate=result.candidate_numbers;
   const candidateHtml=candidate?`<div class="ai-ticket"><div class="generated-ticket-head"><b>Sugestão experimental da IA · ${esc(item.name)}</b><span class="pill pill-warm">Sem vantagem demonstrada</span></div><div class="ball-row">${balls(candidate,false,item.digits)}</div><div class="small-note">${esc(result.candidate_note||'Combinação exploratória, não é previsão nem altera a probabilidade teórica.')} ${item.bonus?.type==='team'?'Escolha também o Time do Coração na conferência.':item.bonus?.type==='month'?'Escolha também o Mês da Sorte na conferência.':item.bonus?.type==='trevos'?'Escolha também os trevos na conferência.':''}</div><div class="form-actions"><button type="button" class="button" data-action="ai-use-candidate" data-numbers="${esc(JSON.stringify(candidate))}">Conferir esta sugestão</button></div></div>`:'<div class="small-note">A resposta não forneceu uma combinação válida conforme as regras oficiais; nenhuma combinação foi exibida.</div>';
-  const scope=completeness.complete?completeness.periodLabel:`análise parcial · ${completeness.missingCount} concurso(s) indisponível(is)`;
-  content.innerHTML=`<div class="stats-highlight"><div class="mini-stat"><small>Concursos recebidos</small><b>${esc(draws.length.toLocaleString('pt-BR'))}</b></div><div class="mini-stat"><small>Mais recente</small><b>${esc(stats.latest_contest||'—')}</b></div><div class="mini-stat"><small>Escopo</small><b>${esc(scope)}</b></div></div><h3 class="card-title">Leitura da IA</h3><p class="ai-output">${esc(result.analysis||'O provedor não apresentou um resumo interpretável.')}</p>${observations?`<h3 class="card-title" style="margin-top:14px">Observações do modelo</h3><ul class="ai-observations">${observations}</ul>`:''}${candidateHtml}<div class="notice"><span>ⓘ</span><span>Frequência, atraso, vizinhança e áreas quentes/frias são descrições do histórico, não probabilidades ou previsões. Mesmo uma anomalia aparente não demonstra manipulação nem vantagem futura. ${esc(stats.disclaimer||'')}</span></div>`;
+  const scope=completeness.periodLabel+(completeness.missingCount?` · análise parcial: ${completeness.missingCount} concurso(s) indisponível(is)`: '');
+  content.innerHTML=`${completeness.warning?`<div class="notice notice-warning">${esc(completeness.warning)} · o histórico pode estar desatualizado.</div>`:""}<div class="stats-highlight"><div class="mini-stat"><small>Concursos recebidos</small><b>${esc(draws.length.toLocaleString('pt-BR'))}</b></div><div class="mini-stat"><small>Mais recente</small><b>${esc(stats.latest_contest||'—')}</b></div><div class="mini-stat"><small>Escopo</small><b>${esc(scope)}</b></div></div><h3 class="card-title">Leitura da IA</h3><p class="ai-output">${esc(result.analysis||'O provedor não apresentou um resumo interpretável.')}</p>${observations?`<h3 class="card-title" style="margin-top:14px">Observações do modelo</h3><ul class="ai-observations">${observations}</ul>`:''}${candidateHtml}<div class="notice"><span>ⓘ</span><span>Frequência, atraso, vizinhança e áreas quentes/frias são descrições do histórico, não probabilidades ou previsões. Mesmo uma anomalia aparente não demonstra manipulação nem vantagem futura. ${esc(stats.disclaimer||'')}</span></div>`;
+
 }
 
 async function runPersonalAIAnalysis(event) {
@@ -273,10 +283,12 @@ async function runPersonalAIAnalysis(event) {
     const completeness=await fetchAssistantHistory(item,mode,progress);
     if (version!==renderVersion || state.page!=='assistant' || state.game!==item.key) return;
     if (!completeness.draws.length) throw new Error('Não há concursos disponíveis para esta análise.');
-    if (!completeness.complete && mode==='all' && !allowPartial) throw new Error(`Não foi possível obter ${completeness.missingCount} concurso(s). Marque a opção de análise parcial se desejar continuar; a IA não será chamada sem essa escolha.`);
+    if (completeness.missingCount && !allowPartial) throw new Error(`Não foi possível obter ${completeness.missingCount} concurso(s). Marque a opção de análise parcial se desejar continuar; a IA não será chamada sem essa escolha.`);
     status.textContent='Calculando';
     progress.textContent=`Calculando estatísticas descritivas de ${completeness.draws.length.toLocaleString('pt-BR')} concursos; a seguir os dados serão enviados ao provedor selecionado.`;
-    const stats=await api(`/${item.key}/statistics/from-draws`,{method:'POST',body:JSON.stringify({draws:completeness.draws})});
+    // Send only fields used by server analytics; bulky display metadata is not needed.
+    const drawsForStats=completeness.draws.map(({game,contest,numbers,second_numbers,trevos,ordered_numbers,month,team,special_draw})=>({game,contest,numbers,second_numbers,trevos,ordered_numbers,month,team,special_draw}));
+    const stats=await api(`/${item.key}/statistics/from-draws`,{method:'POST',body:JSON.stringify({draws:drawsForStats})});
     if (version!==renderVersion || state.page!=='assistant' || state.game!==item.key) return;
     status.textContent=`${config.model}`;
     progress.textContent=`Enviando diretamente a ${config.model} em ${config.provider}; nenhum segredo passa pelo backend do site.`;
@@ -284,7 +296,7 @@ async function runPersonalAIAnalysis(event) {
     if (version!==renderVersion || state.page!=='assistant' || state.game!==item.key) return;
     renderAssistantAnalysis(result,item,completeness.draws,completeness,stats);
     status.textContent='Concluída';
-    progress.textContent=`Fonte: resultados oficiais da CAIXA. ${completeness.draws.length.toLocaleString('pt-BR')} concursos enviados; janela ${completeness.draws.at(-1)?.contest||'—'}–${completeness.draws[0]?.contest||'—'}.`;
+    progress.textContent=`Fonte: histórico consultado via Worker e/ou cache; não verificado independentemente. ${completeness.warning?"Último concurso pode estar desatualizado. ":""}${completeness.draws.length.toLocaleString('pt-BR')} concursos enviados; janela ${completeness.draws.at(-1)?.contest||'—'}–${completeness.draws[0]?.contest||'—'}.`;
   } catch(error) {
     if (version!==renderVersion) return;
     status.textContent='Não concluída';
@@ -324,9 +336,15 @@ async function generateAssistantTicket() {
   if (!target) return;
   target.innerHTML='<div class="loading-block"><span class="spinner"></span>Gerando combinação aleatória...</div>';
   try {
-    const data=await api(`/${item.key}/generate`,{method:'POST',body:JSON.stringify({count:1})});
+    const payload={count:1};
+    if (item.key==='timemania') {
+      const team=$('#assistant-team')?.value?.trim() || '';
+      if (!team || team.length>100) throw new Error('Informe o Time do Coração (até 100 caracteres).');
+      payload.bonus={team};
+    }
+    const data=await api(`/${item.key}/generate`,{method:'POST',body:JSON.stringify(payload)});
     const ticket=data.items[0];
-    target.innerHTML=`<div class="generated-ticket"><div class="generated-ticket-head"><b>Jogo aleatório</b><span class="pill">Sem ponderação histórica</span></div>${item.key==='supersete'?`<div class="col-grid">${ticket.columns.map((values,index)=>`<div class="col-box"><strong>COLUNA ${index+1}</strong>${balls(values)}</div>`).join('')}</div>`:`<div class="ball-row">${balls(ticket.numbers,false,item.digits)}</div>`}<div class="ticket-stats">Chance combinatória teórica por jogo: 1 em ${esc(Number(ticket.probability.one_in).toLocaleString('pt-BR'))}</div><div class="small-note">${esc(data.disclaimer)}</div></div>`;
+    target.innerHTML=`<div class="generated-ticket"><div class="generated-ticket-head"><b>Jogo aleatório</b><span class="pill">Sem ponderação histórica</span></div>${item.key==='supersete'?`<div class="col-grid">${ticket.columns.map((values,index)=>`<div class="col-box"><strong>COLUNA ${index+1}</strong>${balls(values)}</div>`).join('')}</div>`:`<div class="ball-row">${balls(ticket.numbers,false,item.digits)}</div>`}${ticket.bonus?.team?`<div class="ticket-stats">Time do Coração: ${esc(ticket.bonus.team)}</div>`:''}<div class="ticket-stats">${esc(probabilityEvent(item,ticket.probability))}: 1 em ${esc(Number(ticket.probability.one_in).toLocaleString('pt-BR'))}</div><div class="small-note">${esc(data.disclaimer)}</div></div>`;
   } catch(error) { target.innerHTML=errorBlock(error.message); }
 }
 async function renderTools() {
@@ -346,7 +364,7 @@ async function calculateProbability(event) {
   try {
     const data=await api(`/${item.key}/probability?pick_count=${encodeURIComponent(picks)}&trevo_count=${encodeURIComponent(trevos)}`);
     if (version!==renderVersion || state.page!=='tools' || state.game!==item.key) return;
-    target.innerHTML=`<div class="stats-highlight"><div class="mini-stat"><small>${esc(data.event)}</small><b>1 em ${esc(Number(data.one_in).toLocaleString('pt-BR'))}</b></div><div class="mini-stat"><small>Percentual teórico</small><b>${esc(Number(data.percent).toExponential(3))}%</b></div></div><div class="small-note">${esc(data.method)} Sorteios são aleatórios e independentes.</div>`;
+    target.innerHTML=`<div class="stats-highlight"><div class="mini-stat"><small>${esc(probabilityEvent(item,data))}</small><b>1 em ${esc(Number(data.one_in).toLocaleString('pt-BR'))}</b></div><div class="mini-stat"><small>Percentual teórico</small><b>${esc(Number(data.percent).toExponential(3))}%</b></div></div><div class="small-note">${esc(data.method)} Sorteios são aleatórios e independentes.</div>`;
   } catch(error) { target.innerHTML=errorBlock(error.message); }
 }
 async function handleGenerate(event) {
@@ -376,7 +394,7 @@ async function handleGenerate(event) {
     const response=await api(`/${item.key}/generate`,{method:'POST',body:JSON.stringify(payload)});
     if (version!==renderVersion || state.page!=='generator' || state.game!==item.key) return;
     state.generated=response.items; state.simulatorTickets=[];
-    target.innerHTML=response.items.map(ticket=>`<div class="generated-ticket"><div class="generated-ticket-head"><b>Jogo ${esc(ticket.ticket_number)}</b><span class="pill">Aleatório</span></div>${item.key==='supersete'?`<div class="col-grid">${ticket.columns.map((values,i)=>`<div class="col-box"><strong>COLUNA ${i+1}</strong>${balls(values)}</div>`).join('')}</div>`:`<div class="ball-row">${balls(ticket.numbers)}</div>`}${ticket.bonus?.month?`<div class="ticket-stats">Mês da Sorte: ${esc(months[Number(ticket.bonus.month)-1]||ticket.bonus.month)}</div>`:''}${ticket.bonus?.team?`<div class="ticket-stats">Time do Coração: ${esc(ticket.bonus.team)}</div>`:''}${ticket.bonus?.trevos?`<div class="ticket-stats">Trevos: ${balls(ticket.bonus.trevos,true)}</div>`:''}<div class="ticket-stats"><span>Soma: ${esc(ticket.sum??'—')}</span><span>Pares: ${esc(ticket.even_count)}</span><span>Ímpares: ${esc(ticket.odd_count)}</span><span>Repetidas do último: ${esc(ticket.repeated_from_latest)}</span><span>Chance teórica por jogo: 1 em ${esc(Number(ticket.probability.one_in).toLocaleString('pt-BR'))}</span></div></div>`).join('')+`<div class="form-actions"><button class="button button-primary" data-action="test-generated">Conferir estes jogos</button><a class="button" href="${API}/${item.key}/export.csv?limit=100">↓ Exportar histórico</a></div><div class="small-note">${esc(response.disclaimer)}</div>`;
+    target.innerHTML=response.items.map(ticket=>`<div class="generated-ticket"><div class="generated-ticket-head"><b>Jogo ${esc(ticket.ticket_number)}</b><span class="pill">Aleatório</span></div>${item.key==='supersete'?`<div class="col-grid">${ticket.columns.map((values,i)=>`<div class="col-box"><strong>COLUNA ${i+1}</strong>${balls(values)}</div>`).join('')}</div>`:`<div class="ball-row">${balls(ticket.numbers)}</div>`}${ticket.bonus?.month?`<div class="ticket-stats">Mês da Sorte: ${esc(months[Number(ticket.bonus.month)-1]||ticket.bonus.month)}</div>`:''}${ticket.bonus?.team?`<div class="ticket-stats">Time do Coração: ${esc(ticket.bonus.team)}</div>`:''}${ticket.bonus?.trevos?`<div class="ticket-stats">Trevos: ${balls(ticket.bonus.trevos,true)}</div>`:''}<div class="ticket-stats"><span>Soma: ${esc(ticket.sum??'—')}</span><span>Pares: ${esc(ticket.even_count)}</span><span>Ímpares: ${esc(ticket.odd_count)}</span><span>Repetidas do último: ${esc(ticket.repeated_from_latest)}</span><span>${esc(probabilityEvent(item,ticket.probability))}: 1 em ${esc(Number(ticket.probability.one_in).toLocaleString('pt-BR'))}</span></div></div>`).join('')+`<div class="form-actions"><button class="button button-primary" data-action="test-generated">Conferir estes jogos</button><a class="button" href="${API}/${item.key}/export.csv?limit=100">↓ Exportar histórico</a></div><div class="small-note">${esc(response.disclaimer)}</div>`;
   } catch(error) { target.innerHTML=errorBlock(error.message); }
 }
 async function handleSimulate(event) {
@@ -384,7 +402,23 @@ async function handleSimulate(event) {
   const typed=$('#sim-numbers').value;
   let tickets;
   if (state.simulatorTickets.length && typed===state.simulatorText) {
-    tickets=state.simulatorTickets;
+    tickets=state.simulatorTickets.map(ticket=>({...ticket, bonus:{...(ticket.bonus||{})}}));
+    // Keep each generated ticket's distinct bonus unless the user edits the field;
+    // an edit explicitly applies to all displayed games, including clearing it.
+    if (item.bonus?.type==='trevos') {
+      const raw=$('#sim-trevos').value;
+      const initial=(state.simulatorBonus?.trevos||[]).join(', ');
+      if (raw!==initial) {
+        const trevos=parseNumberLines(raw)[0]||[];
+        tickets.forEach(ticket=>ticket.bonus.trevos=trevos);
+      }
+    } else if (item.bonus?.type==='month') {
+      const raw=$('#sim-month').value, initial=String(state.simulatorBonus?.month||'');
+      if (raw!==initial) tickets.forEach(ticket=>{if(raw) ticket.bonus.month=Number(raw); else delete ticket.bonus.month;});
+    } else if (item.bonus?.type==='team') {
+      const raw=$('#sim-team').value, initial=state.simulatorBonus?.team||'';
+      if (raw!==initial) tickets.forEach(ticket=>{ticket.bonus.team=raw.trim();});
+    }
   } else {
     const parsed=parseNumberLines(typed);
     if (!parsed.length) { $('#sim-result').innerHTML=errorBlock('Digite ao menos um jogo.'); return; }
@@ -400,7 +434,7 @@ async function handleSimulate(event) {
     const draw=await api(`/${item.key}/latest`);
     const response=await api(`/${item.key}/simulate`,{method:'POST',body:JSON.stringify({tickets,draw})});
     if (version!==renderVersion || state.page!=='simulator' || state.game!==item.key) return;
-    target.innerHTML=`<div class="card" style="box-shadow:none;padding:12px;border-color:#dfe9de"><div class="card-head"><div><h3 class="card-title">Resultado do concurso ${esc(response.contest)}</h3><div class="card-subtitle">${esc(response.draw_date||'')}</div></div><span class="pill">Oficial</span></div><div class="ball-row">${balls(response.draw.numbers)}${response.draw.second_numbers?.length?balls(response.draw.second_numbers):''}${response.draw.trevos?.length?balls(response.draw.trevos,true):''}</div>${response.results.map(result=>`<div class="draw-row"><div class="draw-title">Jogo ${esc(result.ticket_number)}</div><div>${result.main_hits!==undefined?`<b>${esc(result.main_hits)} acertos</b>`:`<b>${esc(result.hits)} colunas</b>`}${result.second_hits!==undefined?` · 2º sorteio ${esc(result.second_hits)}`:''} ${result.award?`<span class="pill pill-warm">${esc(typeof result.award==='string'?result.award:JSON.stringify(result.award))}</span>`:'<span class="pill pill-muted">Sem faixa de premiação</span>'}${result.month_hit?'<span class="pill">Mês da Sorte</span>':''}${result.team_hit?'<span class="pill">Time do Coração</span>':''}${result.trevo_hits?`<span class="pill">${esc(result.trevo_hits)} trevos</span>`:''}</div></div>`).join('')}<div class="small-note">A conferência é informativa; confirme premiações no portal oficial da CAIXA.</div></div>`;
+    target.innerHTML=`<div class="card" style="box-shadow:none;padding:12px;border-color:#dfe9de"><div class="card-head"><div><h3 class="card-title">Resultado do concurso ${esc(response.contest)}</h3><div class="card-subtitle">${esc(response.draw_date||'')}</div></div><span class="pill pill-muted">Não verificado</span></div><div class="small-note">${esc(response.provenance?.description||"Resultado fornecido pelo navegador; o servidor não verificou sua origem.")} ${esc(draw.source?`Fonte informada pelo navegador: ${draw.source}.`:"")}</div>${draw.warning?`<div class="notice notice-warning">${esc(draw.warning)} · o concurso pode estar desatualizado; confirme na CAIXA.</div>`:""}<div class="ball-row">${balls(response.draw.numbers)}${response.draw.second_numbers?.length?balls(response.draw.second_numbers):''}${response.draw.trevos?.length?balls(response.draw.trevos,true):''}</div>${response.results.map(result=>`<div class="draw-row"><div class="draw-title">Jogo ${esc(result.ticket_number)}</div><div>${result.main_hits!==undefined?`<b>${esc(result.main_hits)} acertos</b>`:`<b>${esc(result.hits)} colunas</b>`}${result.second_hits!==undefined?` · 2º sorteio ${esc(result.second_hits)}`:''} ${result.award?`<span class="pill pill-warm">${esc(typeof result.award==='string'?result.award:JSON.stringify(result.award))}</span>`:'<span class="pill pill-muted">Sem faixa de premiação</span>'}${result.month_hit?'<span class="pill">Mês da Sorte</span>':''}${result.team_hit?'<span class="pill">Time do Coração</span>':''}${result.trevo_hits?`<span class="pill">${esc(result.trevo_hits)} trevos</span>`:''}</div></div>`).join('')}<div class="small-note">A conferência é informativa; confirme premiações no portal oficial da CAIXA.</div></div>`;
   } catch(error) { target.innerHTML=errorBlock(error.message); }
 }
 function handleClick(event) {

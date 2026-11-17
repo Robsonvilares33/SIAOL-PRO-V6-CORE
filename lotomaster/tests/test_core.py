@@ -64,9 +64,9 @@ class GeneratorTests(unittest.TestCase):
 
     def test_milionaria_generates_unique_trevos(self):
         with patch("lotomaster.engine.storage.latest_draw", return_value=None):
-            ticket = generate_tickets("maismilionaria", {"bonus": {"trevo_count": 4}, "seed": 17})[0]
-        self.assertEqual(len(ticket["bonus"]["trevos"]), 4)
-        self.assertEqual(len(set(ticket["bonus"]["trevos"])), 4)
+            ticket = generate_tickets("maismilionaria", {"bonus": {"trevo_count": 2}, "seed": 17})[0]
+        self.assertEqual(len(ticket["bonus"]["trevos"]), 2)
+        self.assertEqual(len(set(ticket["bonus"]["trevos"])), 2)
 
     def test_invalid_constraints_are_rejected(self):
         with patch("lotomaster.engine.storage.latest_draw", return_value=None):

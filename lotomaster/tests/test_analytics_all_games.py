@@ -28,8 +28,8 @@ class AllGameStatisticsTests(unittest.TestCase):
 
     def test_lotomania_grid_and_neighbors_are_descriptive_counts(self):
         result = analyze_draws("lotomania", [
-            {"game": "lotomania", "contest": 2, "numbers": [0, 1, 10, 99]},
-            {"game": "lotomania", "contest": 1, "numbers": [0, 1, 11]},
+            {"game": "lotomania", "contest": 2, "numbers": [0, 1, 10, 99] + list(range(55, 71))},
+            {"game": "lotomania", "contest": 1, "numbers": [0, 1, 11] + list(range(55, 72))},
         ])
         grid = result["layout"]["number_grid"]
         self.assertEqual(grid["grid"][0]["count"], 2)
