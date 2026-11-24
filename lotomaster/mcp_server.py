@@ -63,6 +63,7 @@ MAX_GAME_DRAWS = 50
 MAX_GAME_COMPARISONS = 5000
 EDITABLE_BRANCH = "feature/lotomaster-public-parity"
 MAX_BRANCH_DIFF_BYTES = 131_072
+MAX_BRANCH_REVIEW_CANDIDATES = 5000
 MAX_BRANCH_SOURCE_SNAPSHOT_BYTES = 16 * 1024 * 1024
 MAX_FINGERPRINT_DIFF_BYTES = 128 * 1024 * 1024
 MAX_CHECK_OUTPUT_CHARS = 8_000
@@ -1151,12 +1152,13 @@ def _safe_worktree_snapshot_fallback(candidate: Path) -> tuple[tuple[int, ...], 
     return signature_before, raw
 
 
-def _capture_diff_source_versions(paths: list[str]) -> tuple[str, dict[str, Any]]:
+def _capture_diff_source_versions(paths: list[str]) -> tuple[str, dict[str, Any], list[str]]:
     head = _git_output(["rev-parse", "HEAD"]).strip()
     if re.fullmatch(r"[0-9a-f]{40,64}", head) is None:
         raise ValueError("HEAD inválido durante a revisão do diff.")
     sources: dict[str, Any] = {}
     captured_bytes = 0
+    worktree_excluded = []
     for path in paths:
         if not _is_editable_branch_path(path):
             raise ValueError("Caminho fora do conjunto seguro de revisão.")
@@ -1167,21 +1169,22 @@ def _capture_diff_source_versions(paths: list[str]) -> tuple[str, dict[str, Any]
                 raise ValueError("Conversão de conteúdo Git não verificável durante a revisão do diff.")
         head_source = _tracked_preimage_snapshot(path, head, strict=True)
         index_source = _indexed_preimage_snapshot(path, strict=True)
-        worktree_source = _safe_worktree_snapshot(path)
+        try:
+            worktree_source = _safe_worktree_snapshot(path)
+        except ValueError:
+            worktree_source = None
+            worktree_excluded.append(path)
         for source in (head_source, index_source, worktree_source):
             if source is not None:
                 captured_bytes += len(source[1])
                 if captured_bytes > MAX_BRANCH_SOURCE_SNAPSHOT_BYTES:
                     raise ValueError("Snapshot dos arquivos alterados excede o limite da revisão.")
         sources[path] = (head_source, index_source, worktree_source, attributes)
-    return head, sources
+    return head, sources, worktree_excluded
 
 
-def _review_candidate_paths() -> list[str]:
-    candidates = {
-        item["path"] for item in _project_file_index()
-        if _is_editable_branch_path(item["path"])
-    }
+def _review_candidate_paths() -> tuple[list[str], int]:
+    candidates = set()
     tracked_outputs = (
         _git_output(["ls-tree", "-rz", "--full-tree", "HEAD", "--", "lotomaster"]),
         _git_output(["ls-files", "--stage", "-z", "--", "lotomaster"]),
@@ -1191,19 +1194,15 @@ def _review_candidate_paths() -> list[str]:
             if "\t" not in entry:
                 continue
             path = entry.split("\t", 1)[1]
-            if not path or path in candidates or not _is_editable_branch_path(path):
-                continue
-            if os.path.lexists(REPO_ROOT / path):
-                continue
-            if _tracked_preimage_is_safe(path) or _indexed_preimage_is_safe(path):
+            if path and _is_editable_branch_path(path):
                 candidates.add(path)
-            if len(candidates) > MAX_PROJECT_FILES:
-                raise ValueError("Há muitos caminhos seguros para revisar o diff.")
-    return sorted(candidates)
+    ordered = sorted(candidates)
+    excluded_count = max(0, len(ordered) - MAX_BRANCH_REVIEW_CANDIDATES)
+    return ordered[:MAX_BRANCH_REVIEW_CANDIDATES], excluded_count
 
 
-def _safe_changed_paths() -> tuple[list[str], list[str], list[str]]:
-    candidates = _review_candidate_paths()
+def _safe_changed_paths() -> tuple[list[str], list[str], int]:
+    candidates, excluded_candidate_count = _review_candidate_paths()
     attributes = _git_paths_attributes(candidates)
     eligible = []
     excluded = []
@@ -1218,21 +1217,52 @@ def _safe_changed_paths() -> tuple[list[str], list[str], list[str]]:
 
     if eligible:
         literal_paths = [f":(literal){path}" for path in eligible]
-        staged = _git_output([
-            "diff", "--cached", "--no-renames", "--name-only", "-z", "HEAD", "--", *literal_paths,
-        ]).split("\0")
-        unstaged = _git_output([
-            "diff", "--no-renames", "--name-only", "-z", "--", *literal_paths,
+        changed = _git_output([
+            "status", "--porcelain=v1", "-z", "--untracked-files=no", "--no-renames",
+            "--", *literal_paths,
         ]).split("\0")
     else:
-        staged = []
-        unstaged = []
+        changed = []
     allowed = set(eligible)
+    changed_paths = set()
+    for entry in changed:
+        if not entry:
+            continue
+        if len(entry) < 4 or entry[2] != " ":
+            raise ValueError("Estado Git incompleto durante a revisão do diff.")
+        status = entry[:2]
+        path = entry[3:]
+        if status != "  " and path in allowed:
+            changed_paths.add(path)
     return (
-        sorted({path for path in staged if path in allowed}),
-        sorted({path for path in unstaged if path in allowed}),
-        excluded,
+        sorted(changed_paths), excluded, excluded_candidate_count,
     )
+
+
+def _tree_version_signature(source: tuple[str, bytes] | None, *, indexed: bool) -> tuple[str, bytes] | None:
+    if source is None:
+        return None
+    metadata = source[0].split("\t", 1)[0].split()
+    if indexed:
+        if len(metadata) != 3 or metadata[2] != "0":
+            raise ValueError("Snapshot do index incompleto durante a revisão do diff.")
+    elif len(metadata) != 3 or metadata[1] != "blob":
+        raise ValueError("Snapshot HEAD incompleto durante a revisão do diff.")
+    return metadata[0], source[1]
+
+
+def _index_worktree_differs(
+    index_source: tuple[str, bytes] | None,
+    worktree_source: tuple[tuple[int, ...], bytes] | None,
+) -> bool:
+    if index_source is None:
+        return worktree_source is not None
+    if worktree_source is None:
+        return True
+    index_version = _tree_version_signature(index_source, indexed=True)
+    index_mode = index_version[0] if index_version is not None else "100644"
+    worktree_mode = "100755" if worktree_source[0][2] & 0o111 else "100644"
+    return index_mode != worktree_mode or index_source[1] != worktree_source[1]
 
 
 def _redact_private_keys_from_file_versions(diff: str, sources: dict[str, Any]) -> str:
@@ -1311,30 +1341,127 @@ def _render_staged_diff_from_snapshot(
         raise ValueError("Não foi possível criar um índice temporário para revisar o diff.") from None
 
 
+def _render_unstaged_diff_from_snapshot(
+    head: str, paths: list[str], sources: dict[str, Any],
+) -> str:
+    if not paths:
+        return ""
+    if re.fullmatch(r"[0-9a-f]{40,64}", head) is None:
+        raise ValueError("HEAD inválido durante a renderização do snapshot unstaged.")
+    root = REPO_ROOT.resolve()
+    git_directory = _git_output(["rev-parse", "--absolute-git-dir"]).strip()
+    if not git_directory:
+        raise ValueError("Diretório Git indisponível durante a renderização do snapshot unstaged.")
+    try:
+        with tempfile.TemporaryDirectory(prefix="lotomaster-mcp-worktree-") as temporary:
+            worktree = Path(temporary) / "worktree"
+            worktree.mkdir()
+            environment = _safe_git_environment()
+            environment["GIT_INDEX_FILE"] = str(Path(temporary) / "index")
+
+            def run_git(arguments: list[str], *, input_data: bytes | None = None) -> bytes:
+                try:
+                    completed = subprocess.run(
+                        ["git", "--git-dir", git_directory, "--work-tree", str(worktree), *arguments],
+                        cwd=root, env=environment, input=input_data,
+                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10, check=False,
+                    )
+                except (OSError, subprocess.TimeoutExpired):
+                    raise ValueError("Não foi possível renderizar o snapshot unstaged do diff.") from None
+                if completed.returncode != 0:
+                    raise ValueError("Não foi possível renderizar o snapshot unstaged do diff.")
+                return completed.stdout
+
+            run_git(["read-tree", head])
+            index_info = []
+            for path in paths:
+                if path not in sources:
+                    raise ValueError("Snapshot unstaged incompleto durante a revisão do diff.")
+                index_source = sources[path][1]
+                if index_source is None:
+                    index_info.append(
+                        b"0 " + b"0" * len(head) + b" 0\t" + os.fsencode(path) + b"\0"
+                    )
+                else:
+                    index_info.append(os.fsencode(index_source[0]) + b"\0")
+
+                worktree_source = sources[path][2]
+                if worktree_source is not None:
+                    target = worktree.joinpath(*path.split("/"))
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(worktree_source[1])
+                    mode = 0o755 if worktree_source[0][2] & 0o111 else 0o644
+                    target.chmod(mode)
+
+            if index_info:
+                run_git(["update-index", "-z", "--index-info"], input_data=b"".join(index_info))
+            literal_paths = [f":(literal){path}" for path in paths]
+            diff = run_git([
+                "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames",
+                "--unified=3", "--", *literal_paths,
+            ])
+            return diff.decode("utf-8", errors="replace")
+    except OSError:
+        raise ValueError("Não foi possível criar arquivos temporários para revisar o diff unstaged.") from None
+
+
 def _review_branch_diff(transport: str) -> dict[str, Any]:
     branch = _assert_branch_edit_access(transport)
-    staged_paths, unstaged_paths, attribute_excluded_paths = _safe_changed_paths()
-    changed_paths = sorted(set(staged_paths) | set(unstaged_paths))
+    changed_paths, attribute_excluded_paths, candidate_inventory_excluded = _safe_changed_paths()
     diff_withheld = False
     diff_parts = []
+    staged_paths = []
+    unstaged_paths = []
+    worktree_excluded_paths = []
+    unstable_files = []
+    unrendered_paths = []
     try:
-        head_before, source_before = _capture_diff_source_versions(changed_paths)
-        if staged_paths:
-            staged_diff = _render_staged_diff_from_snapshot(head_before, staged_paths, source_before)
-            if staged_diff:
-                diff_parts.append("Staged changes:\n" + staged_diff)
-        if unstaged_paths:
-            literal_unstaged = [f":(literal){path}" for path in unstaged_paths]
-            unstaged_diff = _git_output([
-                "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames", "--unified=3",
-                "--", *literal_unstaged,
-            ])
-            if unstaged_diff:
-                diff_parts.append("Unstaged changes:\n" + unstaged_diff)
-        head_after, source_after = _capture_diff_source_versions(changed_paths)
-        if head_after != head_before or source_after != source_before:
+        head_before, source_before, worktree_excluded_paths = _capture_diff_source_versions(changed_paths)
+        head_after, source_after, excluded_after = _capture_diff_source_versions(changed_paths)
+        if head_after != head_before:
             diff_withheld = True
         else:
+            excluded_before = set(worktree_excluded_paths)
+            excluded_after_set = set(excluded_after)
+            staged_unstable = set()
+            unstaged_unstable = set()
+            for path in changed_paths:
+                if path not in source_before or path not in source_after:
+                    raise ValueError("Snapshot incompleto durante a revisão do diff.")
+                before = source_before[path]
+                after = source_after[path]
+                if before[0] != after[0] or before[1] != after[1] or before[3] != after[3]:
+                    staged_unstable.add(path)
+                    unstaged_unstable.add(path)
+                if before[2] != after[2] or (path in excluded_before) != (path in excluded_after_set):
+                    unstaged_unstable.add(path)
+            unstable_files = sorted(staged_unstable | unstaged_unstable)
+            worktree_excluded = excluded_before
+            for path in changed_paths:
+                head_source, index_source, worktree_source, _attributes = source_before[path]
+                if (
+                    path not in staged_unstable
+                    and _tree_version_signature(head_source, indexed=False)
+                    != _tree_version_signature(index_source, indexed=True)
+                ):
+                    staged_paths.append(path)
+                if (
+                    path not in worktree_excluded and path not in unstaged_unstable
+                    and _index_worktree_differs(index_source, worktree_source)
+                ):
+                    unstaged_paths.append(path)
+            unrendered_paths = sorted(
+                set(changed_paths) - set(staged_paths) - set(unstaged_paths)
+                - worktree_excluded - set(unstable_files)
+            )
+            if staged_paths:
+                staged_diff = _render_staged_diff_from_snapshot(head_before, staged_paths, source_before)
+                if staged_diff:
+                    diff_parts.append("Staged changes:\n" + staged_diff)
+            if unstaged_paths:
+                unstaged_diff = _render_unstaged_diff_from_snapshot(head_before, unstaged_paths, source_before)
+                if unstaged_diff:
+                    diff_parts.append("Unstaged changes:\n" + unstaged_diff)
             diff = _redact_sensitive_text("\n".join(diff_parts))
             diff = _redact_private_keys_from_file_versions(diff, source_before)
     except ValueError:
@@ -1347,7 +1474,11 @@ def _review_branch_diff(transport: str) -> dict[str, Any]:
     ]).split("\0")
     safe_untracked = sorted({path for path in untracked if path and path in safe and _is_editable_branch_path(path)})
     encoded = diff.encode("utf-8")
-    complete = not diff_withheld and not attribute_excluded_paths and len(encoded) <= MAX_BRANCH_DIFF_BYTES
+    complete = (
+        not diff_withheld and not attribute_excluded_paths and not candidate_inventory_excluded
+        and not worktree_excluded_paths and not unstable_files and not unrendered_paths
+        and len(encoded) <= MAX_BRANCH_DIFF_BYTES
+    )
     if not diff_withheld and not complete:
         diff = encoded[:MAX_BRANCH_DIFF_BYTES].decode("utf-8", errors="ignore")
     return {
@@ -1356,6 +1487,10 @@ def _review_branch_diff(transport: str) -> dict[str, Any]:
         "changed_files": changed_paths,
         "staged_files": staged_paths,
         "attribute_excluded_candidates": attribute_excluded_paths,
+        "candidate_inventory_excluded": candidate_inventory_excluded,
+        "worktree_excluded_files": worktree_excluded_paths,
+        "unstable_files": unstable_files,
+        "unrendered_files": unrendered_paths,
         "untracked_files_without_contents": safe_untracked,
         "diff": _redact_sensitive_text(diff),
         "diff_complete": complete,

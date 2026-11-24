@@ -463,8 +463,9 @@ class MCPBranchEditTests(unittest.TestCase):
         self._git(root, "add", "lotomaster/script.py")
         head = self._git(root, "rev-parse", "HEAD").stdout.strip()
         with patch.object(mcp_server, "REPO_ROOT", root):
-            captured_head, sources = mcp_server._capture_diff_source_versions(["lotomaster/script.py"])
+            captured_head, sources, excluded = mcp_server._capture_diff_source_versions(["lotomaster/script.py"])
             self.assertEqual(captured_head, head)
+            self.assertEqual(excluded, [])
             target.write_text("live index version\n", encoding="utf-8")
             self._git(root, "add", "lotomaster/script.py")
             diff = mcp_server._render_staged_diff_from_snapshot(
@@ -472,6 +473,108 @@ class MCPBranchEditTests(unittest.TestCase):
             )
         self.assertIn("captured staged version", diff)
         self.assertNotIn("live index version", diff)
+
+    def test_unstaged_diff_uses_captured_index_and_worktree_not_live_versions(self):
+        temporary, root, target = self._repo()
+        self.addCleanup(temporary.cleanup)
+        target.write_text("captured index version\n", encoding="utf-8")
+        self._git(root, "add", "lotomaster/script.py")
+        target.write_text("captured worktree version\n", encoding="utf-8")
+        path = "lotomaster/script.py"
+        with patch.object(mcp_server, "REPO_ROOT", root):
+            head, sources, excluded = mcp_server._capture_diff_source_versions([path])
+            self.assertEqual(excluded, [])
+            target.write_text("live index version\n", encoding="utf-8")
+            self._git(root, "add", path)
+            target.write_text("live worktree version\n", encoding="utf-8")
+            diff = mcp_server._render_unstaged_diff_from_snapshot(head, [path], sources)
+        self.assertIn("captured index version", diff)
+        self.assertIn("captured worktree version", diff)
+        self.assertNotIn("live index version", diff)
+        self.assertNotIn("live worktree version", diff)
+
+    @unittest.skipUnless(os.name == "posix", "symlink de arquivo requer suporte POSIX")
+    def test_staged_diff_survives_unsafe_symlink_worktree_copy(self):
+        temporary, root, target = self._repo()
+        self.addCleanup(temporary.cleanup)
+        target.write_text("captured staged version\n", encoding="utf-8")
+        self._git(root, "add", "lotomaster/script.py")
+        outside = root / "outside-private.txt"
+        outside.write_text("must not enter the staged diff\n", encoding="utf-8")
+        target.unlink()
+        target.symlink_to(outside)
+        with patch.object(mcp_server, "REPO_ROOT", root), patch.dict(
+            os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"},
+        ):
+            review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
+        self.assertEqual(review["staged_files"], ["lotomaster/script.py"])
+        self.assertEqual(review["worktree_excluded_files"], ["lotomaster/script.py"])
+        self.assertFalse(review["diff_complete"])
+        self.assertIn("captured staged version", review["diff"])
+        self.assertNotIn("must not enter", review["diff"])
+
+    def test_review_candidate_inventory_is_independent_of_capped_project_listing(self):
+        temporary, root, _ = self._repo()
+        self.addCleanup(temporary.cleanup)
+        later = root / "lotomaster" / "z_last.py"
+        later.write_text("before\n", encoding="utf-8")
+        self._git(root, "add", "lotomaster/z_last.py")
+        self._git(root, "commit", "-q", "-m", "add later project file")
+        later.write_text("after\n", encoding="utf-8")
+        with (
+            patch.object(mcp_server, "REPO_ROOT", root),
+            patch.object(mcp_server, "MAX_PROJECT_FILES", 1),
+            patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"}),
+        ):
+            review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
+        self.assertEqual(review["changed_files"], ["lotomaster/z_last.py"])
+        self.assertEqual(review["candidate_inventory_excluded"], 0)
+        self.assertTrue(review["diff_complete"])
+        self.assertIn("after", review["diff"])
+
+    def test_review_marks_candidate_inventory_limit_as_incomplete(self):
+        temporary, root, _ = self._repo()
+        self.addCleanup(temporary.cleanup)
+        later = root / "lotomaster" / "z_last.py"
+        later.write_text("before\n", encoding="utf-8")
+        self._git(root, "add", "lotomaster/z_last.py")
+        self._git(root, "commit", "-q", "-m", "add later project file")
+        later.write_text("after\n", encoding="utf-8")
+        with (
+            patch.object(mcp_server, "REPO_ROOT", root),
+            patch.object(mcp_server, "MAX_BRANCH_REVIEW_CANDIDATES", 1),
+            patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"}),
+        ):
+            review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
+        self.assertFalse(review["diff_complete"])
+        self.assertEqual(review["candidate_inventory_excluded"], 1)
+
+    def test_changed_paths_come_from_one_comparison_against_head(self):
+        temporary, root, target = self._repo()
+        self.addCleanup(temporary.cleanup)
+        target.write_text("staged version\n", encoding="utf-8")
+        self._git(root, "add", "lotomaster/script.py")
+        target.write_text("working-tree version\n", encoding="utf-8")
+        original_git_output = mcp_server._git_output
+        path_queries = []
+
+        def record_path_query(arguments, *, timeout=10):
+            if arguments and arguments[0] == "status" and "--porcelain=v1" in arguments:
+                path_queries.append(arguments)
+            return original_git_output(arguments, timeout=timeout)
+
+        with (
+            patch.object(mcp_server, "REPO_ROOT", root),
+            patch.object(mcp_server, "_git_output", side_effect=record_path_query),
+            patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"}),
+        ):
+            review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
+        self.assertEqual(len(path_queries), 1)
+        self.assertIn("--no-renames", path_queries[0])
+        self.assertEqual(path_queries[0][0], "status")
+        self.assertEqual(review["changed_files"], ["lotomaster/script.py"])
+        self.assertIn("staged version", review["diff"])
+        self.assertIn("working-tree version", review["diff"])
 
     def test_review_disables_rename_detection_and_keeps_both_safe_paths(self):
         temporary, root, _ = self._repo()
@@ -581,31 +684,20 @@ class MCPBranchEditTests(unittest.TestCase):
         prefix = "diff --git a/lotomaster/script.py b/lotomaster/script.py\n" + ("context " * 14) + ("padding " * 4) + "\n"
         private_key = "-----BEGIN PRIVATE KEY-----\n" + ("SECRETKEYMATERIAL0123456789\n" * 30) + "-----END PRIVATE KEY-----\n"
         synthetic_diff = prefix + private_key + ("tail " * 100)
-
-        def fake_git(arguments, *, timeout=10):
-            if arguments == ["rev-parse", "--show-toplevel"]:
-                return str(root) + "\n"
-            if arguments == ["branch", "--show-current"]:
-                return mcp_server.EDITABLE_BRANCH + "\n"
-            if arguments and arguments[0] == "ls-tree":
-                return ""
-            if arguments[:2] == ["ls-files", "--stage"]:
-                return ""
-            if "--name-only" in arguments and "--cached" in arguments:
-                return ""
-            if "--name-only" in arguments:
-                return "lotomaster/script.py\0"
-            if "--no-ext-diff" in arguments:
-                return synthetic_diff
-            if arguments[:2] == ["ls-files", "--others"]:
-                return ""
-            raise AssertionError(arguments)
+        target.write_text("staged test version\n", encoding="utf-8")
+        self._git(root, "add", "lotomaster/script.py")
+        path = "lotomaster/script.py"
+        head_source = (f"100644 blob {'1' * 40}\t{path}", private_key.encode("utf-8"))
+        index_content = (private_key + "staged update\n").encode("utf-8")
+        index_source = (f"100644 {'2' * 40} 0\t{path}", index_content)
+        worktree_source = ((1, 2, 0o100644, len(index_content), 3, 4), index_content)
+        sources = {path: (head_source, index_source, worktree_source, {})}
 
         with (
             patch.object(mcp_server, "REPO_ROOT", root),
             patch.object(mcp_server, "MAX_BRANCH_DIFF_BYTES", 256),
-            patch.object(mcp_server, "_git_output", side_effect=fake_git),
-            patch.object(mcp_server, "_capture_diff_source_versions", return_value=("a" * 40, {})),
+            patch.object(mcp_server, "_capture_diff_source_versions", return_value=("a" * 40, sources, [])),
+            patch.object(mcp_server, "_render_staged_diff_from_snapshot", return_value=synthetic_diff),
             patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"}),
         ):
             review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
@@ -637,43 +729,64 @@ class MCPBranchEditTests(unittest.TestCase):
         self.assertNotIn(changed[6], review["diff"])
         self.assertFalse(review["diff_withheld"])
 
-    def test_review_withholds_diff_when_worktree_changes_during_render(self):
+    def test_review_keeps_stable_diffs_when_one_worktree_snapshot_changes(self):
         temporary, root, target = self._repo()
         self.addCleanup(temporary.cleanup)
+        stable = root / "lotomaster" / "stable.py"
+        stable.write_text("stable base\n", encoding="utf-8")
+        self._git(root, "add", "lotomaster/stable.py")
+        self._git(root, "commit", "-q", "-m", "add stable review file")
         target.write_text("rendered version\n", encoding="utf-8")
-        original_git_output = mcp_server._git_output
-        rendered = False
+        stable.write_text("stable working-tree version\n", encoding="utf-8")
+        original_capture = mcp_server._capture_diff_source_versions
+        capture_count = 0
 
-        def mutate_after_diff(arguments, *, timeout=10):
-            nonlocal rendered
-            output = original_git_output(arguments, timeout=timeout)
-            if not rendered and arguments[:1] == ["diff"] and "--no-ext-diff" in arguments:
+        def mutate_after_first_capture(paths):
+            nonlocal capture_count
+            captured = original_capture(paths)
+            capture_count += 1
+            if capture_count == 1:
                 target.write_text("raced version\n", encoding="utf-8")
-                rendered = True
-            return output
+            return captured
 
         with (
             patch.object(mcp_server, "REPO_ROOT", root),
-            patch.object(mcp_server, "_git_output", side_effect=mutate_after_diff),
+            patch.object(mcp_server, "_capture_diff_source_versions", side_effect=mutate_after_first_capture),
             patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"}),
         ):
             review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
-        self.assertTrue(rendered)
-        self.assertTrue(review["diff_withheld"])
+        self.assertEqual(capture_count, 2)
+        self.assertFalse(review["diff_withheld"])
         self.assertFalse(review["diff_complete"])
-        self.assertEqual(review["diff"], "")
+        self.assertEqual(review["unstable_files"], ["lotomaster/script.py"])
+        self.assertIn("stable working-tree version", review["diff"])
+        self.assertNotIn("rendered version", review["diff"])
+        self.assertNotIn("raced version", review["diff"])
 
     def test_review_withholds_diff_when_head_changes_during_render(self):
         temporary, root, target = self._repo()
         self.addCleanup(temporary.cleanup)
         target.write_text("unstaged change\n", encoding="utf-8")
         head = self._git(root, "rev-parse", "HEAD").stdout.strip()
+        original_capture = mcp_server._capture_diff_source_versions
+        capture_count = 0
+
+        def change_reported_head(paths):
+            nonlocal capture_count
+            captured = original_capture(paths)
+            capture_count += 1
+            if capture_count == 2:
+                return "0" * 40, captured[1], captured[2]
+            return captured
+
         with (
             patch.object(mcp_server, "REPO_ROOT", root),
-            patch.object(mcp_server, "_capture_diff_source_versions", side_effect=[(head, {}), ("0" * 40, {})]),
+            patch.object(mcp_server, "_capture_diff_source_versions", side_effect=change_reported_head),
             patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"}),
         ):
             review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
+        self.assertEqual(capture_count, 2)
+        self.assertNotEqual(head, "0" * 40)
         self.assertTrue(review["diff_withheld"])
         self.assertFalse(review["diff_complete"])
         self.assertEqual(review["diff"], "")
