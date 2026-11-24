@@ -1297,13 +1297,13 @@ def _safe_changed_paths() -> tuple[list[str], list[str], int, dict[str, str]]:
         if any(
             attributes[path].get(attribute, "unspecified").casefold()
             != head_attributes[path].get(attribute, "unspecified").casefold()
-            for attribute in ("diff", "binary", "ident")
+            for attribute in ("diff", "binary")
         ):
             fully_excluded_attribute_mismatch.add(path)
         elif any(
             attributes[path].get(attribute, "unspecified").casefold()
             != head_attributes[path].get(attribute, "unspecified").casefold()
-            for attribute in ("text", "eol", "crlf")
+            for attribute in ("text", "eol", "crlf", "ident")
         ):
             unstaged_attribute_mismatch.add(path)
         eligible.append(path)
@@ -1329,7 +1329,7 @@ def _safe_changed_paths() -> tuple[list[str], list[str], int, dict[str, str]]:
             if path in fully_excluded_attribute_mismatch:
                 excluded.append(path)
             else:
-                if path in unstaged_attribute_mismatch:
+                if path in unstaged_attribute_mismatch and status[1] != " ":
                     excluded.append(path)
                 changed_statuses[path] = status
     return (
