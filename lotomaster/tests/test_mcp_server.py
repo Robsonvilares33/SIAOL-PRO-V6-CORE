@@ -1,4 +1,5 @@
 import http.client
+import hashlib
 import io
 import json
 import os
@@ -265,6 +266,146 @@ class MCPReadOnlyTests(unittest.TestCase):
         self.assertIn("localStorage", text)
         self.assertIn("não são visíveis", text)
         self.assertNotIn("LOTOMASTER_MCP_BEARER_TOKEN=", text)
+
+
+class MCPBranchEditTests(unittest.TestCase):
+    def _git(self, root, *arguments):
+        return subprocess.run(
+            ["git", "-C", str(root), *arguments], check=True,
+            capture_output=True, text=True, timeout=10,
+        )
+
+    def _repo(self, branch=mcp_server.EDITABLE_BRANCH):
+        temporary = tempfile.TemporaryDirectory()
+        root = Path(temporary.name)
+        (root / "lotomaster").mkdir()
+        target = root / "lotomaster" / "script.py"
+        target.write_text("before\n", encoding="utf-8")
+        self._git(root, "init", "-q")
+        self._git(root, "branch", "-M", branch)
+        self._git(root, "config", "user.name", "MCP Test")
+        self._git(root, "config", "user.email", "mcp-test@example.invalid")
+        self._git(root, "add", "lotomaster/script.py")
+        self._git(root, "commit", "-q", "-m", "base")
+        return temporary, root, target
+
+    def test_edit_tools_are_opt_in_and_stdio_only(self):
+        with patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "0"}):
+            disabled = mcp_server._dispatch({"jsonrpc": "2.0", "id": 0, "method": "tools/list"}, transport="stdio")
+            disabled_names = {item["name"] for item in disabled["result"]["tools"]}
+            self.assertEqual(len(disabled_names), 9)
+        with patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"}):
+            stdio = mcp_server._dispatch({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, transport="stdio")
+            stdio_init = mcp_server._dispatch({"jsonrpc": "2.0", "id": 5, "method": "initialize", "params": {}}, transport="stdio")
+            http = mcp_server._dispatch({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, transport="http")
+            stdio_names = {item["name"] for item in stdio["result"]["tools"]}
+            http_names = {item["name"] for item in http["result"]["tools"]}
+            self.assertTrue({"edit_branch_file", "review_branch_diff", "run_branch_checks"} <= stdio_names)
+            self.assertIn("Modo opcional de edição local ativo", stdio_init["result"]["instructions"])
+            self.assertEqual(len(http_names), 9)
+            self.assertFalse({"edit_branch_file", "review_branch_diff", "run_branch_checks"} & http_names)
+            denied = mcp_server._dispatch({
+                "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": {"name": "edit_branch_file", "arguments": {}},
+            }, transport="http")
+            self.assertTrue(denied["result"]["isError"])
+
+    def test_edit_uses_expected_hash_and_diff_redacts_sensitive_values(self):
+        temporary, root, target = self._repo()
+        self.addCleanup(temporary.cleanup)
+        original_hash = hashlib.sha256(target.read_bytes()).hexdigest()
+        new_content = 'api_key = "sk-abcdefghijklmnopqrstuvwxyz0123456789"\n'
+        with patch.object(mcp_server, "REPO_ROOT", root), patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"}):
+            result = mcp_server._tool_result("edit_branch_file", {
+                "path": "lotomaster/script.py", "expected_sha256": original_hash, "content": new_content,
+            }, transport="stdio")
+            review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
+        self.assertTrue(result["changed"])
+        self.assertFalse(result["committed"])
+        self.assertFalse(result["published"])
+        self.assertEqual(target.read_text(encoding="utf-8"), new_content)
+        self.assertEqual(list((root / "lotomaster").glob(".lotomaster-mcp-edit-*.tmp")), [])
+        self.assertEqual(review["changed_files"], ["lotomaster/script.py"])
+        self.assertIn("[REDACTED]", review["diff"])
+        self.assertNotIn("sk-abcdefghijklmnopqrstuvwxyz0123456789", review["diff"])
+
+    def test_stale_hash_wrong_branch_and_unsafe_paths_do_not_write(self):
+        temporary, root, target = self._repo()
+        self.addCleanup(temporary.cleanup)
+        with patch.object(mcp_server, "REPO_ROOT", root), patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"}):
+            with self.assertRaisesRegex(ValueError, "SHA-256 divergente"):
+                mcp_server._tool_result("edit_branch_file", {
+                    "path": "lotomaster/script.py", "expected_sha256": "0" * 64, "content": "bad\n",
+                }, transport="stdio")
+            with self.assertRaisesRegex(ValueError, "canônico"):
+                mcp_server._tool_result("edit_branch_file", {
+                    "path": "lotomaster/../outside.md", "expected_sha256": hashlib.sha256(target.read_bytes()).hexdigest(), "content": "bad\n",
+                }, transport="stdio")
+            with self.assertRaisesRegex(ValueError, "estudos congelados"):
+                mcp_server._tool_result("edit_branch_file", {
+                    "path": "lotomaster/AVALIACAO_LOTOMASTER.md", "expected_sha256": "0" * 64, "content": "bad\n",
+                }, transport="stdio")
+            with self.assertRaisesRegex(ValueError, "estudos congelados"):
+                mcp_server._tool_result("edit_branch_file", {
+                    "path": "lotomaster/studies/frozen_runner.py", "expected_sha256": "0" * 64, "content": "bad\n",
+                }, transport="stdio")
+            self.assertFalse(mcp_server._is_editable_branch_path("lotomaster/studies/frozen_runner.py"))
+            outside = root / "outside.md"
+            outside.write_text("outside\n", encoding="utf-8")
+            (root / "lotomaster" / "link.py").symlink_to(outside)
+            with self.assertRaisesRegex(ValueError, "Arquivo inexistente"):
+                mcp_server._tool_result("edit_branch_file", {
+                    "path": "lotomaster/link.py", "expected_sha256": hashlib.sha256(outside.read_bytes()).hexdigest(), "content": "bad\n",
+                }, transport="stdio")
+            hardlink = root / "lotomaster" / "hardlink.py"
+            os.link(target, hardlink)
+            with self.assertRaisesRegex(ValueError, "hard links"):
+                mcp_server._tool_result("edit_branch_file", {
+                    "path": "lotomaster/hardlink.py", "expected_sha256": hashlib.sha256(target.read_bytes()).hexdigest(), "content": "bad\n",
+                }, transport="stdio")
+            self._git(root, "switch", "-c", "main")
+            wrong_branch_tools = mcp_server._dispatch(
+                {"jsonrpc": "2.0", "id": 4, "method": "tools/list"}, transport="stdio",
+            )
+            wrong_branch_names = {item["name"] for item in wrong_branch_tools["result"]["tools"]}
+            self.assertNotIn("edit_branch_file", wrong_branch_names)
+            wrong_branch_init = mcp_server._dispatch(
+                {"jsonrpc": "2.0", "id": 6, "method": "initialize", "params": {}}, transport="stdio",
+            )
+            self.assertNotIn("Modo opcional de edição local ativo", wrong_branch_init["result"]["instructions"])
+            with self.assertRaisesRegex(ValueError, "somente na branch"):
+                mcp_server._tool_result("edit_branch_file", {
+                    "path": "lotomaster/script.py", "expected_sha256": hashlib.sha256(target.read_bytes()).hexdigest(), "content": "bad\n",
+                }, transport="stdio")
+        self.assertEqual(target.read_text(encoding="utf-8"), "before\n")
+
+    def test_check_runner_uses_fixed_commands_and_sanitized_temporary_environment(self):
+        calls = []
+
+        def fake_check(label, command, env, timeout):
+            calls.append((label, command, env, timeout))
+            return {"check": label, "passed": True}
+
+        with (
+            patch.object(mcp_server, "_assert_branch_edit_access", return_value=mcp_server.EDITABLE_BRANCH),
+            patch.object(mcp_server, "_working_tree_fingerprint", side_effect=["same", "same"]),
+            patch.object(mcp_server, "_project_file_index", return_value=[]),
+            patch.object(mcp_server, "_run_fixed_check", side_effect=fake_check),
+            patch.object(mcp_server.shutil, "which", return_value="/usr/bin/node"),
+            patch.dict(os.environ, {"OPENAI_API_KEY": "do-not-pass"}),
+        ):
+            result = mcp_server._run_branch_checks("stdio")
+        self.assertTrue(result["all_passed"])
+        labels = [item[0] for item in calls]
+        self.assertEqual(labels, [
+            "unittest_lotomaster", "node_check:lotomaster/static/app.js",
+            "node_check:lotomaster/static/caixa-fallback.js", "git_diff_check",
+        ])
+        for _, command, env, _ in calls:
+            self.assertNotIn("do-not-pass", env.values())
+            self.assertNotIn("OPENAI_API_KEY", env)
+        self.assertIn("lotomaster/tests", calls[0][1])
+        self.assertEqual(calls[1][1][1:3], ["--check", "lotomaster/static/app.js"])
 
 
 if __name__ == "__main__":

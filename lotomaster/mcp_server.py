@@ -1,5 +1,12 @@
 """Servidor MCP do Lotomaster, isolado da aplicação web.
 
+O modo padrão oferece apenas leitura, cálculo e prévias não persistentes. Um
+editor local opcional pode ser habilitado por LOTOMASTER_MCP_ENABLE_BRANCH_EDIT=1;
+ele só funciona em stdio, na branch feature/lotomaster-public-parity e em
+arquivos de código permitidos ou no README funcional. Avaliações, mapeamentos e
+estudos congelados ficam fora do escopo. Não cria arquivos finais, não faz commit
+e não publica. HTTP permanece somente leitura.
+
 Use ``python3 -m lotomaster.mcp_server --transport stdio`` para subprocesso
 local sem Bearer ou ``--transport http`` para Streamable HTTP autenticado.
 HTTP exige LOTOMASTER_MCP_BEARER_TOKEN (32+ caracteres) e, por padrão,
@@ -7,14 +14,21 @@ escuta somente em 127.0.0.1. Proxy, TLS e publicação remota não são configur
 """
 from __future__ import annotations
 
+import ast
 import argparse
+import hashlib
 import hmac
 import json
 import os
 import random
+import secrets
 import re
+import shutil
 import sqlite3
+import stat
 import sys
+import subprocess
+import tempfile
 import threading
 from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,11 +58,21 @@ MAX_PROJECT_FILES = 1000
 MAX_GAME_TICKETS = 100
 MAX_GAME_DRAWS = 50
 MAX_GAME_COMPARISONS = 5000
+EDITABLE_BRANCH = "feature/lotomaster-public-parity"
+MAX_BRANCH_DIFF_BYTES = 131_072
+MAX_CHECK_OUTPUT_CHARS = 8_000
+MAX_CHECK_TIMEOUT_SECONDS = 120
 PROJECT_TEXT_EXTENSIONS = {
     ".py", ".md", ".html", ".js", ".mjs", ".cjs", ".css", ".json",
     ".toml", ".txt", ".yml", ".yaml", ".sql", ".sh", ".ini", ".cfg",
     ".csv", ".tsv",
 }
+EDITABLE_CODE_EXTENSIONS = {".py", ".js", ".mjs", ".cjs", ".html", ".css"}
+EDITABLE_DOC_PATHS = {"lotomaster/README.md"}
+PROTECTED_EDIT_PATH_MARKERS = (
+    "avaliac", "evaluation", "mapeamento", "study", "studies", "estud",
+    "experiment", "experimento", "frozen", "congelado", "snapshot",
+)
 EXCLUDED_PROJECT_DIRS = {
     ".git", ".venv", "venv", "env", "node_modules", "__pycache__",
     ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache", "build",
@@ -88,12 +112,18 @@ Módulos conhecidos incluem catalog.py, analytics.py, engine.py, storage.py,
 client_draws.py, assistant.py e assistant_access.py, além dos motores e
 experimentos na raiz do repositório. O MCP não executa arquivos lidos.
 
-As ferramentas disponíveis são somente leitura, cálculo e geração de prévia
-não persistente. Jogos podem ser analisados se fornecidos pelo agente ou lidos
-de arquivos textuais permitidos do repositório. Não há ferramentas para
-editar/apagar estudos congelados, alterar jogos salvos, operar contas, apostar,
-publicar, acessar credenciais ou enviar dados a terceiros. Jogos guardados no
-localStorage de outro navegador não são visíveis para este servidor.
+Por padrão, as ferramentas são somente leitura, cálculo e geração de prévia
+não persistente. Opcionalmente, no transporte stdio e somente quando
+LOTOMASTER_MCP_ENABLE_BRANCH_EDIT=1, há edição de arquivos de código permitidos
+ou do README funcional na branch feature/lotomaster-public-parity, com SHA-256 esperado;
+avaliações, mapeamentos e estudos congelados ficam fora do escopo. Também há
+revisão do diff e verificações fixas. A edição substitui atomicamente o arquivo
+permitido por um temporário transitório no mesmo diretório; não cria arquivos
+finais do projeto nem apaga arquivos. Não faz commit, push, merge ou deploy.
+HTTP permanece somente leitura.
+Não há ferramentas para editar estudos congelados, alterar jogos salvos, operar
+contas, apostar, acessar credenciais ou enviar dados a terceiros. Jogos
+guardados no localStorage de outro navegador não são visíveis para este servidor.
 
 Frequências, atrasos e padrões são estatísticas descritivas, não previsões.
 Nenhuma análise altera as probabilidades matemáticas de um sorteio futuro.
@@ -377,6 +407,38 @@ def _read_project_file(arguments: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+BRANCH_EDIT_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "edit_branch_file",
+        "title": "Editar arquivo existente na branch autorizada",
+        "description": "Substitui o conteúdo de um único arquivo de código existente sob lotomaster/ ou do README funcional, somente via stdio com opt-in e na branch feature/lotomaster-public-parity. Exige o SHA-256 atual. Avaliações, mapeamentos, estudos congelados e caminhos marcados como experimentos ficam bloqueados. Não cria novos arquivos do projeto nem apaga arquivos; a substituição atômica usa um temporário transitório no mesmo diretório. Não altera o banco nem faz commit ou publicação.",
+        "inputSchema": {
+            "type": "object", "properties": {
+                "path": {"type": "string", "description": "Caminho relativo canônico, por exemplo lotomaster/mcp_server.py."},
+                "expected_sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+                "content": {"type": "string", "maxLength": MAX_PROJECT_FILE_BYTES},
+            },
+            "required": ["path", "expected_sha256", "content"], "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
+    },
+    {
+        "name": "review_branch_diff",
+        "title": "Revisar diff local da branch autorizada",
+        "description": "Mostra o diff staged e unstaged de arquivos de código permitidos e do README funcional sob lotomaster/ na branch autorizada; nomes de arquivos não rastreados são listados sem conteúdo. Não altera arquivos nem inclui conteúdo de avaliações, mapeamentos, estudos congelados, arquivos ocultos ou fora do escopo.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "run_branch_checks",
+        "title": "Executar verificações fixas da branch",
+        "description": "Executa os testes unittest de lotomaster/tests, parsing de sintaxe Python sem gerar bytecode, node --check em dois arquivos JS fixos e git diff --check. Disponível somente via stdio com opt-in, na branch autorizada; usa banco temporário e ambiente sem chaves do processo.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+    },
+]
+
+
 def _read_only_history(game: str, limit: int, before: int | None) -> dict[str, Any]:
     spec = _resolve_spec(game)
     limit = _require_int(limit, "limit", 1, MAX_HISTORY_PAGE)
@@ -512,7 +574,368 @@ def _generate_preview(arguments: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _tool_result(name: str, arguments: dict[str, Any]) -> Any:
+def _branch_edit_enabled(transport: str) -> bool:
+    return transport == "stdio" and os.environ.get("LOTOMASTER_MCP_ENABLE_BRANCH_EDIT") == "1"
+
+
+def _safe_git_environment() -> dict[str, str]:
+    return {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": "/nonexistent",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+
+
+def _git_output(arguments: list[str], *, timeout: int = 10) -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(REPO_ROOT.resolve()), *arguments],
+            cwd=REPO_ROOT.resolve(), env=_safe_git_environment(),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise ValueError("Git indisponível; a operação foi bloqueada.") from None
+    if completed.returncode != 0:
+        raise ValueError("Não foi possível verificar o estado local do repositório.")
+    return completed.stdout
+
+
+def _assert_branch_edit_access(transport: str) -> str:
+    if transport != "stdio":
+        raise ValueError("Edição e verificações só estão disponíveis pelo transporte stdio local.")
+    if os.environ.get("LOTOMASTER_MCP_ENABLE_BRANCH_EDIT") != "1":
+        raise ValueError("Modo de edição desativado; habilite LOTOMASTER_MCP_ENABLE_BRANCH_EDIT=1 explicitamente.")
+    root = REPO_ROOT.resolve()
+    top = _git_output(["rev-parse", "--show-toplevel"]).strip()
+    branch = _git_output(["branch", "--show-current"]).strip()
+    try:
+        is_checkout_root = Path(top).resolve() == root
+    except OSError:
+        is_checkout_root = False
+    if not is_checkout_root or branch != EDITABLE_BRANCH:
+        raise ValueError(f"Operação permitida somente na branch {EDITABLE_BRANCH} deste checkout.")
+    return branch
+
+
+def _read_fd_limited(file_fd: int) -> bytes:
+    chunks = []
+    remaining = MAX_PROJECT_FILE_BYTES + 1
+    while remaining:
+        chunk = os.read(file_fd, remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _open_editable_file(requested: Any):
+    if not isinstance(requested, str) or not requested or len(requested) > 512:
+        raise ValueError("Informe um caminho relativo válido sob lotomaster/.")
+    parts = requested.split("/")
+    if (
+        "\\" in requested or requested.startswith("/")
+        or parts[0] != "lotomaster" or len(parts) < 2
+        or any(part in {"", ".", ".."} or part.startswith(".") for part in parts)
+        or any(part.lower() in EXCLUDED_PROJECT_DIRS for part in parts)
+    ):
+        raise ValueError("O caminho deve ser canônico e permanecer sob lotomaster/.")
+    if any(marker in part.casefold() for part in parts[1:] for marker in PROTECTED_EDIT_PATH_MARKERS):
+        raise ValueError("Avaliações, mapeamentos e estudos congelados estão fora do escopo de edição.")
+    filename = parts[-1].casefold()
+    if (
+        (Path(parts[-1]).suffix.lower() not in EDITABLE_CODE_EXTENSIONS and "/".join(parts) not in EDITABLE_DOC_PATHS)
+        or filename.startswith("manus_")
+        or any(marker in filename for marker in ("secret", "credential", "password", "private_key"))
+    ):
+        raise ValueError("Esse arquivo não está no conjunto permitido para edição.")
+    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        raise ValueError("O sistema não oferece abertura segura de caminhos; a edição foi bloqueada.")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW
+    root_fd = None
+    parent_fd = None
+    file_fd = None
+    try:
+        root_fd = os.open(REPO_ROOT.resolve(), directory_flags)
+        parent_fd = os.dup(root_fd)
+        for part in parts[:-1]:
+            next_fd = os.open(part, directory_flags, dir_fd=parent_fd)
+            os.close(parent_fd)
+            parent_fd = next_fd
+        file_fd = os.open(parts[-1], file_flags, dir_fd=parent_fd)
+        file_stat = os.fstat(file_fd)
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+            raise ValueError("Só é permitido editar arquivo regular sem hard links.")
+        if file_stat.st_size > MAX_PROJECT_FILE_BYTES:
+            raise ValueError("O arquivo excede o limite de tamanho permitido.")
+        raw = _read_fd_limited(file_fd)
+        if len(raw) > MAX_PROJECT_FILE_BYTES or b"\x00" in raw:
+            raise ValueError("O arquivo excede o limite ou não é texto.")
+        try:
+            raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            raise ValueError("Só é permitido editar arquivo de texto UTF-8.") from None
+        return parent_fd, file_fd, parts[-1], raw, file_stat
+    except ValueError:
+        if file_fd is not None:
+            os.close(file_fd)
+        if parent_fd is not None:
+            os.close(parent_fd)
+        raise
+    except OSError:
+        if file_fd is not None:
+            os.close(file_fd)
+        if parent_fd is not None:
+            os.close(parent_fd)
+        raise ValueError("Arquivo inexistente, inacessível ou fora do escopo permitido.") from None
+    finally:
+        if root_fd is not None:
+            try:
+                os.close(root_fd)
+            except OSError:
+                pass
+
+
+def _edit_branch_file(arguments: dict[str, Any], transport: str) -> dict[str, Any]:
+    branch = _assert_branch_edit_access(transport)
+    if set(arguments) != {"path", "expected_sha256", "content"}:
+        raise ValueError("Informe somente path, expected_sha256 e content.")
+    expected = arguments.get("expected_sha256")
+    content = arguments.get("content")
+    if not isinstance(expected, str) or re.fullmatch(r"[0-9a-fA-F]{64}", expected) is None:
+        raise ValueError("expected_sha256 deve conter 64 dígitos hexadecimais.")
+    if not isinstance(content, str):
+        raise ValueError("content deve ser texto UTF-8.")
+    try:
+        new_bytes = content.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError("content deve ser texto UTF-8 válido.") from None
+    if len(new_bytes) > MAX_PROJECT_FILE_BYTES or b"\x00" in new_bytes:
+        raise ValueError("O conteúdo excede o limite de tamanho ou contém bytes nulos.")
+
+    parent_fd, file_fd, filename, old_bytes, old_stat = _open_editable_file(arguments.get("path"))
+    temp_name = None
+    temp_fd = None
+    try:
+        current_hash = hashlib.sha256(old_bytes).hexdigest()
+        if not hmac.compare_digest(current_hash, expected.lower()):
+            raise ValueError("SHA-256 divergente; arquivo não alterado. Leia a versão atual e tente novamente.")
+        if old_bytes == new_bytes:
+            return {"path": arguments["path"], "branch": branch, "changed": False, "sha256": current_hash}
+
+        _assert_branch_edit_access(transport)
+        temp_name = f".lotomaster-mcp-edit-{secrets.token_hex(12)}.tmp"
+        temp_fd = os.open(
+            temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            stat.S_IMODE(old_stat.st_mode), dir_fd=parent_fd,
+        )
+        os.fchmod(temp_fd, stat.S_IMODE(old_stat.st_mode))
+        with os.fdopen(temp_fd, "wb") as stream:
+            temp_fd = None
+            stream.write(new_bytes)
+            stream.flush()
+            os.fsync(stream.fileno())
+
+        latest_fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        try:
+            latest_stat = os.fstat(latest_fd)
+            latest_bytes = _read_fd_limited(latest_fd)
+        finally:
+            os.close(latest_fd)
+        same_file = (latest_stat.st_dev, latest_stat.st_ino) == (old_stat.st_dev, old_stat.st_ino)
+        if not same_file or not hmac.compare_digest(hashlib.sha256(latest_bytes).hexdigest(), expected.lower()):
+            raise ValueError("O arquivo mudou durante a edição; nada foi sobrescrito.")
+        _assert_branch_edit_access(transport)
+        os.replace(temp_name, filename, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        temp_name = None
+        try:
+            os.fsync(parent_fd)
+        except OSError:
+            pass
+        return {
+            "path": arguments["path"], "branch": branch, "changed": True,
+            "previous_sha256": current_hash, "sha256": hashlib.sha256(new_bytes).hexdigest(),
+            "review_required": True, "next_tool": "review_branch_diff",
+            "committed": False, "published": False,
+        }
+    except OSError:
+        raise ValueError("Não foi possível gravar o arquivo; o erro foi ocultado por segurança.") from None
+    finally:
+        if temp_fd is not None:
+            os.close(temp_fd)
+        if temp_name is not None:
+            try:
+                os.unlink(temp_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+        os.close(file_fd)
+        os.close(parent_fd)
+
+
+def _is_editable_branch_path(path: str) -> bool:
+    if not path.startswith("lotomaster/"):
+        return False
+    if any(marker in part.casefold() for part in path.split("/")[1:] for marker in PROTECTED_EDIT_PATH_MARKERS):
+        return False
+    return Path(path).suffix.lower() in EDITABLE_CODE_EXTENSIONS or path in EDITABLE_DOC_PATHS
+
+
+def _safe_changed_paths() -> list[str]:
+    changed = _git_output(["diff", "--name-only", "-z", "HEAD", "--", "lotomaster"]).split("\0")
+    safe = {item["path"] for item in _project_file_index()}
+    return sorted({path for path in changed if path and path in safe and _is_editable_branch_path(path)})
+
+
+def _review_branch_diff(transport: str) -> dict[str, Any]:
+    branch = _assert_branch_edit_access(transport)
+    changed_paths = _safe_changed_paths()
+    if changed_paths:
+        literal_paths = [f":(literal){path}" for path in changed_paths]
+        diff = _git_output([
+            "diff", "--no-ext-diff", "--no-color", "--no-renames", "--unified=3",
+            "HEAD", "--", *literal_paths,
+        ])
+    else:
+        diff = ""
+    safe = {item["path"] for item in _project_file_index()}
+    untracked = _git_output([
+        "ls-files", "--others", "--exclude-standard", "-z", "--", "lotomaster",
+    ]).split("\0")
+    safe_untracked = sorted({path for path in untracked if path and path in safe and _is_editable_branch_path(path)})
+    encoded = diff.encode("utf-8")
+    complete = len(encoded) <= MAX_BRANCH_DIFF_BYTES
+    if not complete:
+        diff = encoded[:MAX_BRANCH_DIFF_BYTES].decode("utf-8", errors="ignore")
+    return {
+        "branch": branch,
+        "scope": "lotomaster/",
+        "changed_files": changed_paths,
+        "untracked_files_without_contents": safe_untracked,
+        "diff": _redact_sensitive_text(diff),
+        "diff_complete": complete,
+        "secrets_redacted": True,
+        "committed": False,
+        "published": False,
+    }
+
+
+def _working_tree_fingerprint() -> str:
+    digest = hashlib.sha256()
+    status = _git_output(["status", "--porcelain=v1", "--untracked-files=all", "--", "lotomaster"])
+    diff = _git_output(["diff", "--binary", "--no-ext-diff", "--no-color", "HEAD", "--", "lotomaster"])
+    digest.update(status.encode("utf-8", errors="replace"))
+    digest.update(diff.encode("utf-8", errors="replace"))
+    safe = {item["path"] for item in _project_file_index()}
+    untracked = _git_output([
+        "ls-files", "--others", "--exclude-standard", "-z", "--", "lotomaster",
+    ]).split("\0")
+    for path in sorted({item for item in untracked if item and item in safe}):
+        digest.update(path.encode("utf-8", errors="replace"))
+        try:
+            digest.update(hashlib.sha256((REPO_ROOT / path).read_bytes()).digest())
+        except OSError:
+            digest.update(b"unreadable")
+    return digest.hexdigest()
+
+
+def _run_fixed_check(label: str, command: list[str], env: dict[str, str], timeout: int) -> dict[str, Any]:
+    try:
+        completed = subprocess.run(
+            command, cwd=REPO_ROOT, env=env, capture_output=True,
+            text=True, encoding="utf-8", errors="replace", timeout=timeout, check=False,
+        )
+        output = _redact_sensitive_text((completed.stdout + "\n" + completed.stderr).strip())
+        truncated = len(output) > MAX_CHECK_OUTPUT_CHARS
+        return {
+            "check": label, "passed": completed.returncode == 0,
+            "return_code": completed.returncode,
+            "output_excerpt": output[:MAX_CHECK_OUTPUT_CHARS], "output_truncated": truncated,
+        }
+    except subprocess.TimeoutExpired:
+        return {"check": label, "passed": False, "timed_out": True, "output_excerpt": "Tempo limite excedido."}
+    except OSError:
+        return {"check": label, "passed": False, "output_excerpt": "Verificação indisponível no ambiente."}
+
+
+def _run_branch_checks(transport: str) -> dict[str, Any]:
+    branch = _assert_branch_edit_access(transport)
+    before = _working_tree_fingerprint()
+    checks: list[dict[str, Any]] = []
+    with tempfile.TemporaryDirectory(prefix="lotomaster-mcp-check-") as temporary:
+        temporary_path = Path(temporary)
+        child_env = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": temporary,
+            "TMPDIR": temporary,
+            "TEMP": temporary,
+            "TMP": temporary,
+            "LOTOMASTER_DB_PATH": str(temporary_path / "lotomaster-test.sqlite3"),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONNOUSERSITE": "1",
+            "CI": "1",
+        }
+        checks.append(_run_fixed_check(
+            "unittest_lotomaster",
+            [sys.executable, "-m", "unittest", "discover", "-s", "lotomaster/tests", "-p", "test*.py"],
+            child_env, MAX_CHECK_TIMEOUT_SECONDS,
+        ))
+        try:
+            python_files = [
+                item["path"] for item in _project_file_index()
+                if item["path"].startswith("lotomaster/") and item["path"].endswith(".py")
+            ]
+            for relative in python_files:
+                source = (REPO_ROOT / relative).read_bytes().decode("utf-8-sig")
+                ast.parse(source, filename=relative)
+            checks.append({"check": "python_syntax", "passed": True, "files_checked": len(python_files)})
+        except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
+            checks.append({"check": "python_syntax", "passed": False, "output_excerpt": "Erro de sintaxe ou arquivo Python inacessível."})
+
+        node = shutil.which("node", path=child_env["PATH"])
+        if node is None:
+            checks.append({"check": "javascript_syntax", "passed": False, "output_excerpt": "Node.js não encontrado."})
+        else:
+            for relative in ("lotomaster/static/app.js", "lotomaster/static/caixa-fallback.js"):
+                checks.append(_run_fixed_check(
+                    f"node_check:{relative}", [node, "--check", relative], child_env, 20,
+                ))
+        checks.append(_run_fixed_check(
+            "git_diff_check",
+            ["git", "-C", str(REPO_ROOT.resolve()), "diff", "--check", "HEAD", "--", "lotomaster"],
+            child_env, 20,
+        ))
+    after = _working_tree_fingerprint()
+    try:
+        final_branch = _assert_branch_edit_access(transport)
+    except ValueError:
+        final_branch = ""
+    passed = all(item.get("passed", False) for item in checks)
+    unchanged = before == after
+    return {
+        "branch": branch,
+        "checks": checks,
+        "all_passed": passed and unchanged and final_branch == branch,
+        "working_tree_unchanged": unchanged,
+        "branch_unchanged": final_branch == branch,
+        "database_used": "SQLite temporário removido ao final",
+        "provider_credentials_passed": False,
+        "committed": False,
+        "published": False,
+    }
+
+
+def _tool_result(name: str, arguments: dict[str, Any], *, transport: str = "") -> Any:
+    if name == "edit_branch_file":
+        return _edit_branch_file(arguments, transport)
+    if name == "review_branch_diff":
+        return _review_branch_diff(transport)
+    if name == "run_branch_checks":
+        return _run_branch_checks(transport)
     if name == "lottery_catalog":
         return {"items": public_catalog(), "count": len(public_catalog())}
     if name == "get_lottery_rules":
@@ -568,7 +991,17 @@ def _jsonrpc_error(request_id: Any, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 
-def _dispatch(message: Any) -> dict[str, Any] | None:
+def _available_tools(transport: str) -> list[dict[str, Any]]:
+    if not _branch_edit_enabled(transport):
+        return TOOLS
+    try:
+        _assert_branch_edit_access(transport)
+    except ValueError:
+        return TOOLS
+    return TOOLS + BRANCH_EDIT_TOOLS
+
+
+def _dispatch(message: Any, *, transport: str = "unknown") -> dict[str, Any] | None:
     if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
         return _jsonrpc_error(message.get("id") if isinstance(message, dict) else None, -32600, "Invalid Request")
     request_id = message.get("id")
@@ -588,6 +1021,7 @@ def _dispatch(message: Any) -> dict[str, Any] | None:
     if method.startswith("notifications/"):
         return None
     if method == "initialize":
+        editing_available = len(_available_tools(transport)) > len(TOOLS)
         requested = params.get("protocolVersion")
         version = requested if isinstance(requested, str) and requested in SUPPORTED_PROTOCOL_VERSIONS else MCP_PROTOCOL_VERSION
         result = {
@@ -596,14 +1030,18 @@ def _dispatch(message: Any) -> dict[str, Any] | None:
                 "tools": {"listChanged": False},
                 "resources": {"subscribe": False, "listChanged": False},
             },
-            "serverInfo": {"name": "lotomaster-mcp", "title": "Lotomaster MCP", "version": "1.0.0"},
-            "instructions": "Ferramentas somente leitura, cálculo e geração não persistente. O banco é acessado em modo somente leitura; não há chamadas à CAIXA, alterações de jogos/estudos, apostas ou acesso a credenciais.",
+            "serverInfo": {"name": "lotomaster-mcp", "title": "Lotomaster MCP", "version": "1.1.0"},
+            "instructions": (
+                "Ferramentas somente leitura, cálculo e geração não persistente. O banco é acessado em modo somente leitura; não há chamadas à CAIXA, alterações de jogos/estudos, apostas ou acesso a credenciais."
+                if not editing_available else
+                "Modo opcional de edição local ativo: use apenas na branch autorizada; revise o diff e rode as verificações. Não há commit, publicação, acesso a credenciais ou escrita no banco."
+            ),
         }
         return None if is_notification else {"jsonrpc": "2.0", "id": request_id, "result": result}
     if method == "ping":
         return None if is_notification else {"jsonrpc": "2.0", "id": request_id, "result": {}}
     if method == "tools/list":
-        return None if is_notification else {"jsonrpc": "2.0", "id": request_id, "result": {"tools": TOOLS}}
+        return None if is_notification else {"jsonrpc": "2.0", "id": request_id, "result": {"tools": _available_tools(transport)}}
     if method == "tools/call":
         if is_notification:
             return None
@@ -611,11 +1049,11 @@ def _dispatch(message: Any) -> dict[str, Any] | None:
         arguments = params.get("arguments", {})
         if not isinstance(name, str) or not isinstance(arguments, dict):
             return _jsonrpc_error(request_id, -32602, "Invalid params")
-        if name not in {tool["name"] for tool in TOOLS}:
+        if name not in {tool["name"] for tool in _available_tools(transport)}:
             result = {"content": [{"type": "text", "text": "Ferramenta não encontrada."}], "isError": True}
         else:
             try:
-                value = _redact_response_value(_tool_result(name, arguments))
+                value = _redact_response_value(_tool_result(name, arguments, transport=transport))
                 text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
                 result = {"content": [{"type": "text", "text": text}], "structuredContent": value, "isError": False}
             except (ValueError, KeyError) as exc:
@@ -753,7 +1191,7 @@ class MCPHandler(BaseHTTPRequestHandler):
         except (UnicodeDecodeError, json.JSONDecodeError):
             self._http_error(400, "JSON inválido.")
             return
-        response = _dispatch(message)
+        response = _dispatch(message, transport="http")
         if response is None:
             self._send(202)
             return
@@ -832,7 +1270,7 @@ def serve_stdio(input_stream=None, output_stream=None) -> None:
         else:
             try:
                 message = json.loads(line)
-                response = _dispatch(message)
+                response = _dispatch(message, transport="stdio")
             except (json.JSONDecodeError, UnicodeDecodeError):
                 response = _jsonrpc_error(None, -32700, "Parse error")
         if response is not None:
@@ -859,7 +1297,7 @@ def serve(host: str | None = None, port: int | None = None) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Servidor MCP somente leitura do Lotomaster.")
+    parser = argparse.ArgumentParser(description="Servidor MCP do Lotomaster; edição opcional apenas por stdio na branch autorizada.")
     parser.add_argument("--transport", choices=("http", "stdio"), default="http")
     parser.add_argument("--host", help="Bind HTTP; padrão seguro 127.0.0.1")
     parser.add_argument("--port", type=int, help="Porta HTTP; padrão 8765")
