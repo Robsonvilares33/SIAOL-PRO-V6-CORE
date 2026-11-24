@@ -1,3 +1,4 @@
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -65,6 +66,51 @@ class LatestResultCacheTests(unittest.TestCase):
             "A CAIXA está temporariamente indisponível; o resultado em cache pode estar desatualizado.",
         )
         self.assertNotIn("rede indisponível", result["warning"])
+
+    def test_failed_refresh_cannot_overwrite_a_concurrent_success(self):
+        cached_db = {"contest": 100, "numbers": [1, 2, 3]}
+        fresh = {"contest": 101, "numbers": [4, 5, 6]}
+        sqlite_read_started = threading.Event()
+        release_sqlite_read = threading.Event()
+        stale_result = {}
+
+        def fetch_draw(_game):
+            if threading.current_thread().name == "stale-refresh":
+                raise OSError("rede indisponível")
+            return fresh
+
+        def latest_draw(_game):
+            sqlite_read_started.set()
+            if not release_sqlite_read.wait(timeout=3):
+                raise TimeoutError("SQLite test barrier timed out")
+            return cached_db
+
+        def run_stale_refresh():
+            try:
+                stale_result["result"] = engine.latest_result("megasena", refresh=True)
+            except Exception as error:
+                stale_result["error"] = error
+
+        with (
+            patch("lotomaster.engine.fetch_draw", side_effect=fetch_draw),
+            patch("lotomaster.engine.storage.latest_draw", side_effect=latest_draw),
+            patch("lotomaster.engine.storage.save_draw"),
+        ):
+            thread = threading.Thread(target=run_stale_refresh, name="stale-refresh")
+            thread.start()
+            try:
+                self.assertTrue(sqlite_read_started.wait(timeout=2))
+                fresh_result = engine.latest_result("megasena", refresh=True)
+            finally:
+                release_sqlite_read.set()
+                thread.join(timeout=3)
+
+        self.assertFalse(thread.is_alive())
+        self.assertNotIn("error", stale_result)
+        self.assertEqual(fresh_result["contest"], 101)
+        self.assertEqual(stale_result["result"]["contest"], 101)
+        self.assertEqual(stale_result["result"]["source"], "CAIXA via Cloudflare Worker")
+        self.assertEqual(engine._latest_cache["megasena"][1]["contest"], 101)
 
 
 if __name__ == "__main__":

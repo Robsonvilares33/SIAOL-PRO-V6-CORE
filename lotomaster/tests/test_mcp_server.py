@@ -399,6 +399,24 @@ class MCPBranchEditTests(unittest.TestCase):
             }, transport="http")
             self.assertTrue(denied["result"]["isError"])
 
+    def test_edit_path_validation_does_not_depend_on_capped_project_listing(self):
+        temporary, root, _ = self._repo()
+        self.addCleanup(temporary.cleanup)
+        target = root / "lotomaster" / "z" / "target.py"
+        target.parent.mkdir()
+        target.write_text("eligible\n", encoding="utf-8")
+        with (
+            patch.object(mcp_server, "REPO_ROOT", root),
+            patch.object(
+                mcp_server, "_project_file_index",
+                side_effect=AssertionError("editing must not use the capped listing"),
+            ),
+        ):
+            self.assertEqual(
+                mcp_server._editable_path_components("lotomaster/z/target.py"),
+                ["lotomaster", "z", "target.py"],
+            )
+
     def test_edit_uses_expected_hash_and_diff_redacts_sensitive_values(self):
         temporary, root, target = self._repo()
         self.addCleanup(temporary.cleanup)

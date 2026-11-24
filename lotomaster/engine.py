@@ -22,7 +22,8 @@ def latest_result(game: str, refresh: bool = True) -> dict:
     spec = get_spec(game)
     key = spec["key"]
     now = time.monotonic()
-    cached_mem = _latest_cache.get(key)
+    with _latest_lock:
+        cached_mem = _latest_cache.get(key)
     if not refresh and cached_mem and 0 <= now - cached_mem[0] < _LATEST_TTL_SECONDS:
         return {**cached_mem[1], "source": "cache"}
     try:
@@ -30,10 +31,19 @@ def latest_result(game: str, refresh: bool = True) -> dict:
         storage.save_draw(draw)
         checked_at = datetime.now(timezone.utc).isoformat()
         draw = {**draw, "_latest_checked_at": checked_at}
-        _latest_cache[key] = (now, draw)
+        with _latest_lock:
+            concurrent_mem = _latest_cache.get(key)
+            if (
+                concurrent_mem is not None
+                and concurrent_mem is not cached_mem
+                and concurrent_mem[1].get("_latest_checked_at")
+            ):
+                return {**concurrent_mem[1], "source": "CAIXA via Cloudflare Worker"}
+            _latest_cache[key] = (now, draw)
         return {**draw, "source": "CAIXA via Cloudflare Worker"}
     except Exception:
         cached_db = storage.latest_draw(key)
+        stale = None
         if cached_db:
             cached_db = {k: v for k, v in cached_db.items() if k not in {"_latest_checked_at", "_known_latest_contest"}}
             stale = {
@@ -41,8 +51,16 @@ def latest_result(game: str, refresh: bool = True) -> dict:
                 "source": "cache",
                 "warning": "A CAIXA está temporariamente indisponível; o resultado em cache pode estar desatualizado.",
             }
-            _latest_cache[key] = (now, stale)
-            return stale
+        with _latest_lock:
+            concurrent_mem = _latest_cache.get(key)
+            if concurrent_mem is not None and concurrent_mem is not cached_mem:
+                current_draw = concurrent_mem[1]
+                if current_draw.get("_latest_checked_at"):
+                    return {**current_draw, "source": "CAIXA via Cloudflare Worker"}
+                return {**current_draw, "source": "cache"}
+            if stale is not None:
+                _latest_cache[key] = (now, stale)
+                return stale
         raise RuntimeError("Não foi possível consultar a CAIXA.") from None
 
 

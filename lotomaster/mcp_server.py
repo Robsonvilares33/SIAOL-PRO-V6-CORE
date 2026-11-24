@@ -953,10 +953,32 @@ def _editable_path_components(requested: Any) -> list[str]:
         or any(marker in filename for marker in ("secret", "credential", "password", "private_key"))
     ):
         raise ValueError("Esse arquivo não está no conjunto permitido para edição.")
-    for entry in _project_file_index():
-        candidate = entry.get("path")
-        if isinstance(candidate, str) and candidate == requested and _is_editable_branch_path(candidate):
-            return candidate.split("/")
+    root = REPO_ROOT.resolve()
+    lotomaster_root = root / "lotomaster"
+    try:
+        is_lotomaster_directory = stat.S_ISDIR(lotomaster_root.lstat().st_mode)
+    except OSError:
+        is_lotomaster_directory = False
+    if not is_lotomaster_directory:
+        raise ValueError("Arquivo inexistente, inacessível ou fora do escopo permitido.")
+    for current, directories, filenames in os.walk(lotomaster_root, topdown=True, followlinks=False):
+        directories[:] = sorted(
+            name for name in directories
+            if not name.startswith(".") and name.lower() not in EXCLUDED_PROJECT_DIRS
+            and not (Path(current) / name).is_symlink()
+        )
+        for filename in sorted(filenames):
+            path = Path(current) / filename
+            try:
+                candidate = path.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            if (
+                candidate == requested
+                and _is_safe_project_file(path)
+                and _is_editable_branch_path(candidate)
+            ):
+                return parts
     raise ValueError("Arquivo inexistente, inacessível ou fora do escopo permitido.")
 
 
