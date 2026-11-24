@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import os
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -455,6 +456,23 @@ class MCPBranchEditTests(unittest.TestCase):
         self.assertIn("staged addition", review["diff"])
         self.assertIn("Unstaged changes:", review["diff"])
 
+    def test_staged_diff_uses_captured_index_not_live_index(self):
+        temporary, root, target = self._repo()
+        self.addCleanup(temporary.cleanup)
+        target.write_text("captured staged version\n", encoding="utf-8")
+        self._git(root, "add", "lotomaster/script.py")
+        head = self._git(root, "rev-parse", "HEAD").stdout.strip()
+        with patch.object(mcp_server, "REPO_ROOT", root):
+            captured_head, sources = mcp_server._capture_diff_source_versions(["lotomaster/script.py"])
+            self.assertEqual(captured_head, head)
+            target.write_text("live index version\n", encoding="utf-8")
+            self._git(root, "add", "lotomaster/script.py")
+            diff = mcp_server._render_staged_diff_from_snapshot(
+                captured_head, ["lotomaster/script.py"], sources,
+            )
+        self.assertIn("captured staged version", diff)
+        self.assertNotIn("live index version", diff)
+
     def test_review_disables_rename_detection_and_keeps_both_safe_paths(self):
         temporary, root, _ = self._repo()
         self.addCleanup(temporary.cleanup)
@@ -569,7 +587,7 @@ class MCPBranchEditTests(unittest.TestCase):
                 return str(root) + "\n"
             if arguments == ["branch", "--show-current"]:
                 return mcp_server.EDITABLE_BRANCH + "\n"
-            if arguments[:2] == ["ls-tree", "-z"]:
+            if arguments and arguments[0] == "ls-tree":
                 return ""
             if arguments[:2] == ["ls-files", "--stage"]:
                 return ""
@@ -779,7 +797,7 @@ class MCPBranchEditTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "posix", "teste de grupo de processos requer POSIX")
     def test_git_fingerprint_rejects_forced_process_group_cleanup_after_zero_exit(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(prefix="fake git fixture ") as directory:
             root = Path(directory)
             fake_bin = root / "bin"
             fake_bin.mkdir()
@@ -789,12 +807,15 @@ class MCPBranchEditTests(unittest.TestCase):
                 "import pathlib,sys,time;time.sleep(2);"
                 "pathlib.Path(sys.argv[1]).write_text('alive')"
             )
-            fake_git.write_text(
-                "#!/usr/bin/env python3\n"
+            fake_git_program = (
                 "import subprocess,sys\n"
                 f"subprocess.Popen([sys.executable,'-c',{child_script!r},{str(marker)!r}])\n"
                 "sys.stdout.buffer.write(b'partial fingerprint')\n"
-                "sys.stdout.flush()\n",
+                "sys.stdout.flush()\n"
+            )
+            fake_git.write_text(
+                "#!/bin/sh\n"
+                f"exec {shlex.quote(sys.executable)} -c {shlex.quote(fake_git_program)} \"$@\"\n",
                 encoding="utf-8",
             )
             fake_git.chmod(0o755)
@@ -817,22 +838,36 @@ class MCPBranchEditTests(unittest.TestCase):
 
             target.write_bytes(b"12345678")
             original_read = mcp_server._read_fd_limited
-            bytes_read = []
+            actual_os_read = os.read
+            read_sizes = []
+
+            def track_os_read(file_fd, amount):
+                content = actual_os_read(file_fd, amount)
+                read_sizes.append(len(content))
+                return content
 
             def grow_then_read(file_fd, limit):
                 with target.open("ab") as writer:
                     writer.write(b"x" * 100_000)
-                content = original_read(file_fd, limit)
-                bytes_read.append(len(content))
-                return content
+                return original_read(file_fd, limit)
 
             with (
                 patch.object(mcp_server, "MAX_PROJECT_FILE_BYTES", 8),
+                patch.object(mcp_server.os, "read", side_effect=track_os_read),
                 patch.object(mcp_server, "_read_fd_limited", side_effect=grow_then_read),
             ):
                 with self.assertRaisesRegex(ValueError, "mudou durante a revisão"):
                     mcp_server._safe_worktree_snapshot_fallback(target)
-            self.assertEqual(bytes_read, [9])
+            self.assertLessEqual(sum(read_sizes), 9)
+            self.assertEqual(sum(read_sizes), 9)
+
+    def test_fallback_snapshot_withholds_on_initial_stat_error_but_keeps_missing_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            candidate = Path(directory) / "candidate.py"
+            with patch.object(Path, "stat", side_effect=PermissionError("blocked")):
+                with self.assertRaisesRegex(ValueError, "Arquivo de trabalho inacessível"):
+                    mcp_server._safe_worktree_snapshot_fallback(candidate)
+            self.assertIsNone(mcp_server._safe_worktree_snapshot_fallback(candidate))
 
     def test_review_withholds_diff_for_unverified_git_worktree_encoding(self):
         temporary, root, target = self._repo()
@@ -864,26 +899,48 @@ class MCPBranchEditTests(unittest.TestCase):
                 "UTF-16LE",
             )
             review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
-        self.assertTrue(review["diff_withheld"])
+        self.assertFalse(review["diff_withheld"])
+        self.assertFalse(review["diff_complete"])
+        self.assertEqual(review["attribute_excluded_candidates"], ["lotomaster/script.py"])
         self.assertEqual(review["diff"], "")
         self.assertNotIn(changed[6], review["diff"])
 
-    def test_review_withholds_diff_for_git_clean_filter(self):
+    def test_review_skips_clean_filter_without_running_it_and_keeps_unfiltered_diff(self):
         temporary, root, target = self._repo()
         self.addCleanup(temporary.cleanup)
-        target.write_text("changed content\n", encoding="utf-8")
+        safe = root / "lotomaster" / "safe.py"
+        safe.write_text("safe before\n", encoding="utf-8")
+        self._git(root, "add", "lotomaster/safe.py")
+        self._git(root, "commit", "-q", "-m", "add unfiltered fixture")
         attributes_file = root / ".gitattributes"
-        attributes_file.write_text("lotomaster/*.py filter=unverified\n", encoding="utf-8")
+        attributes_file.write_text("lotomaster/script.py filter=unset\n", encoding="utf-8")
         self._git(root, "add", ".gitattributes")
-        self._git(root, "commit", "-q", "-m", "configure custom clean filter")
+        self._git(root, "commit", "-q", "-m", "configure ambiguous clean filter")
+        marker = root / "clean-filter-ran.txt"
+        clean_filter = root / "clean filter.sh"
+        clean_filter.write_text(
+            "#!/bin/sh\n"
+            f"printf 'ran\\n' >> {shlex.quote(str(marker))}\n"
+            "cat\n",
+            encoding="utf-8",
+        )
+        clean_filter.chmod(0o755)
+        self._git(root, "config", "filter.unset.clean", shlex.quote(str(clean_filter)))
+        target.write_text("filtered changed content\n", encoding="utf-8")
+        safe.write_text("safe changed content\n", encoding="utf-8")
 
         with patch.object(mcp_server, "REPO_ROOT", root), patch.dict(
             os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"},
         ):
-            self.assertEqual(mcp_server._git_path_attributes("lotomaster/script.py")["filter"], "unverified")
+            self.assertEqual(mcp_server._git_path_attributes("lotomaster/script.py")["filter"], "unset")
             review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
-        self.assertTrue(review["diff_withheld"])
-        self.assertEqual(review["diff"], "")
+        self.assertFalse(marker.exists(), "path discovery must not invoke the configured clean filter")
+        self.assertFalse(review["diff_withheld"])
+        self.assertFalse(review["diff_complete"])
+        self.assertEqual(review["changed_files"], ["lotomaster/safe.py"])
+        self.assertEqual(review["attribute_excluded_candidates"], ["lotomaster/script.py"])
+        self.assertIn("safe changed content", review["diff"])
+        self.assertNotIn("filtered changed content", review["diff"])
 
     def test_fingerprint_rejects_git_diff_larger_than_capture_limit(self):
         temporary, root, target = self._repo()
