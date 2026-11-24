@@ -349,15 +349,15 @@ class MCPReadOnlyTests(unittest.TestCase):
     def test_private_key_redaction_preserves_pagination_line_numbers(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            secret = "UNIQUE_PRIVATE_KEY_SECRET_MATERIAL"
-            source = "before\n-----BEGIN PRIVATE KEY-----\n" + secret + "\n-----END PRIVATE KEY-----\nafter\nlast\n"
+            marker = "fixture-payload-a17c"
+            source = "before\n-----BEGIN PRIVATE KEY-----\n" + marker + "\n-----END PRIVATE KEY-----\nafter\nlast\n"
             (root / "keys.py").write_text(source, encoding="utf-8")
             with patch.object(mcp_server, "REPO_ROOT", root):
                 first = mcp_server._tool_result("read_project_file", {"path": "keys.py", "start_line": 1, "max_lines": 3})
                 second = mcp_server._tool_result("read_project_file", {"path": "keys.py", "start_line": 4, "max_lines": 3})
         self.assertEqual((first["total_lines"], first["start_line"], first["end_line"]), (6, 1, 3))
         self.assertEqual((second["total_lines"], second["start_line"], second["end_line"]), (6, 4, 6))
-        self.assertNotIn(secret, first["content"] + second["content"])
+        self.assertNotIn(marker, first["content"] + second["content"])
         self.assertIn("4: ", second["content"])
 
     def test_analyze_games_is_bounded_and_non_persistent(self):
