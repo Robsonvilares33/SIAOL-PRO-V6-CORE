@@ -493,19 +493,26 @@ class MCPBranchEditTests(unittest.TestCase):
         self.assertNotIn("live index version", diff)
         self.assertNotIn("live worktree version", diff)
 
-    def test_intent_to_add_is_not_reported_as_staged_and_is_rendered_from_snapshot(self):
-        temporary, root, target = self._repo()
+    def test_ignored_new_intent_to_add_is_not_staged_and_renders_as_new_file(self):
+        temporary, root, _ = self._repo()
         self.addCleanup(temporary.cleanup)
+        path = "lotomaster/intent_to_add.py"
+        target = root / path
         target.write_text("intent-to-add contents\n", encoding="utf-8")
-        self._git(root, "add", "-N", "lotomaster/script.py")
+        exclude = root / ".git" / "info" / "exclude"
+        exclude.write_text(exclude.read_text(encoding="utf-8") + f"\n{path}\n", encoding="utf-8")
+        self._git(root, "add", "-N", "--force", "--", path)
         with patch.object(mcp_server, "REPO_ROOT", root), patch.dict(
             os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"},
         ):
             review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
         self.assertEqual(review["staged_files"], [])
+        self.assertEqual(review["changed_files"], [path])
         self.assertTrue(review["diff_complete"])
         self.assertIn("Unstaged changes:", review["diff"])
         self.assertNotIn("Staged changes:", review["diff"])
+        self.assertIn("new file mode", review["diff"])
+        self.assertIn("/dev/null", review["diff"])
         self.assertIn("intent-to-add contents", review["diff"])
 
     def test_empty_intent_to_add_is_distinct_from_a_staged_empty_file(self):
@@ -527,6 +534,31 @@ class MCPBranchEditTests(unittest.TestCase):
         self.assertIn("empty_staged.py", staged_diff)
         self.assertNotIn("empty_intent.py", staged_diff)
         self.assertIn("empty_intent.py", unstaged_diff)
+
+    def test_staged_deletion_with_intent_to_add_preserves_both_diff_sides(self):
+        temporary, root, _ = self._repo()
+        self.addCleanup(temporary.cleanup)
+        path = "lotomaster/empty_tracked.py"
+        target = root / path
+        target.touch()
+        self._git(root, "add", path)
+        self._git(root, "commit", "-q", "-m", "add empty tracked file")
+        self._git(root, "rm", "--cached", "--force", path)
+        target.write_text("replacement after staged deletion\n", encoding="utf-8")
+        self._git(root, "add", "--intent-to-add", "--force", "--", path)
+        self.assertTrue(self._git(root, "status", "--porcelain=v1", "--untracked-files=no").stdout.startswith("DA "))
+
+        with patch.object(mcp_server, "REPO_ROOT", root), patch.dict(
+            os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"},
+        ):
+            review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
+        self.assertEqual(review["staged_files"], [path])
+        self.assertTrue(review["diff_complete"])
+        staged_diff, unstaged_diff = review["diff"].split("Unstaged changes:", 1)
+        self.assertIn("deleted file mode", staged_diff)
+        self.assertIn("new file mode", unstaged_diff)
+        self.assertIn("/dev/null", unstaged_diff)
+        self.assertIn("replacement after staged deletion", unstaged_diff)
 
     @unittest.skipUnless(os.name == "posix", "symlink de arquivo requer suporte POSIX")
     def test_staged_diff_survives_unsafe_symlink_worktree_copy(self):
@@ -1150,6 +1182,66 @@ class MCPBranchEditTests(unittest.TestCase):
         self.assertEqual(review["attribute_excluded_candidates"], ["lotomaster/script.py"])
         self.assertIn("safe changed", review["diff"])
         self.assertNotIn("new line with CRLF", review["diff"])
+
+    def test_text_attribute_mismatch_keeps_staged_diff_but_omits_unstaged_side(self):
+        temporary, root, target = self._repo()
+        self.addCleanup(temporary.cleanup)
+        attributes = root / ".gitattributes"
+        attributes.write_text("lotomaster/script.py text\n", encoding="utf-8")
+        self._git(root, "add", ".gitattributes")
+        self._git(root, "commit", "-q", "-m", "configure text normalization")
+        target.write_text("captured staged text\n", encoding="utf-8")
+        self._git(root, "add", "lotomaster/script.py")
+        attributes.write_text("lotomaster/script.py -text\n", encoding="utf-8")
+        self._git(root, "add", ".gitattributes")
+        target.write_bytes(b"unstaged CRLF marker\r\n")
+
+        with patch.object(mcp_server, "REPO_ROOT", root), patch.dict(
+            os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"},
+        ):
+            review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
+        self.assertFalse(review["diff_withheld"])
+        self.assertFalse(review["diff_complete"])
+        self.assertIn("lotomaster/script.py", review["staged_files"])
+        self.assertIn("lotomaster/script.py", review["attribute_excluded_candidates"])
+        self.assertIn("captured staged text", review["diff"])
+        self.assertNotIn("unstaged CRLF marker", review["diff"])
+
+    def test_ident_attribute_mismatch_excludes_the_changed_path(self):
+        temporary, root, target = self._repo()
+        self.addCleanup(temporary.cleanup)
+        attributes = root / ".gitattributes"
+        attributes.write_text("lotomaster/script.py ident\n", encoding="utf-8")
+        self._git(root, "add", ".gitattributes")
+        self._git(root, "commit", "-q", "-m", "configure ident attribute")
+        attributes.write_text("lotomaster/script.py -ident\n", encoding="utf-8")
+        target.write_text("changed under different ident rules\n", encoding="utf-8")
+
+        original_run = subprocess.run
+        git_calls = []
+
+        def record_run(command, *args, **kwargs):
+            git_calls.append((tuple(command), kwargs.get("env", {}).copy()))
+            return original_run(command, *args, **kwargs)
+
+        with (
+            patch.object(mcp_server, "REPO_ROOT", root),
+            patch.object(mcp_server.subprocess, "run", side_effect=record_run),
+            patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"}),
+        ):
+            head_attributes = mcp_server._git_paths_attributes(["lotomaster/script.py"], source="HEAD")
+            current_attributes = mcp_server._git_path_attributes("lotomaster/script.py")
+            review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
+        cached_queries = [call for call in git_calls if "check-attr" in call[0] and "--cached" in call[0]]
+        self.assertEqual(head_attributes["lotomaster/script.py"]["ident"], "set")
+        self.assertEqual(current_attributes["ident"], "unset")
+        self.assertTrue(cached_queries)
+        self.assertTrue(all("GIT_INDEX_FILE" in environment for _, environment in cached_queries))
+        self.assertFalse(any("--source=HEAD" in command for command, _ in git_calls))
+        self.assertFalse(review["diff_complete"])
+        self.assertEqual(review["attribute_excluded_candidates"], ["lotomaster/script.py"])
+        self.assertEqual(review["changed_files"], [])
+        self.assertNotIn("changed under different ident rules", review["diff"])
 
     def test_review_skips_clean_filter_without_running_it_and_keeps_unfiltered_diff(self):
         temporary, root, target = self._repo()

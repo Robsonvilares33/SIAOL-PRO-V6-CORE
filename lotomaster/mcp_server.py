@@ -1029,17 +1029,35 @@ def _git_paths_attributes(paths: list[str], *, source: str | None = None) -> dic
     attributes_by_path = {path: {} for path in paths}
     if not paths:
         return attributes_by_path
-    command = ["git", "-C", str(REPO_ROOT.resolve()), "check-attr", "-z", "--all"]
-    if source is not None:
-        command.append(f"--source={source}")
-    command.append("--stdin")
+    root = REPO_ROOT.resolve()
+    command = ["git", "-C", str(root), "check-attr"]
+    environment = _safe_git_environment()
     try:
-        completed = subprocess.run(
-            command,
-            cwd=REPO_ROOT.resolve(), env=_safe_git_environment(),
-            input=b"".join(os.fsencode(path) + b"\0" for path in paths),
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10, check=False,
-        )
+        if source is None:
+            completed = subprocess.run(
+                command + ["-z", "--all", "--stdin"],
+                cwd=root, env=environment,
+                input=b"".join(os.fsencode(path) + b"\0" for path in paths),
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10, check=False,
+            )
+        elif source == "HEAD":
+            with tempfile.TemporaryDirectory(prefix="lotomaster-git-attributes-") as temporary:
+                environment["GIT_INDEX_FILE"] = str(Path(temporary) / "index")
+                prepared = subprocess.run(
+                    ["git", "-C", str(root), "read-tree", source],
+                    cwd=root, env=environment, stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL, timeout=10, check=False,
+                )
+                if prepared.returncode != 0:
+                    raise ValueError("Não foi possível preparar atributos HEAD durante a revisão do diff.")
+                completed = subprocess.run(
+                    command + ["--cached", "-z", "--all", "--stdin"],
+                    cwd=root, env=environment,
+                    input=b"".join(os.fsencode(path) + b"\0" for path in paths),
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10, check=False,
+                )
+        else:
+            raise ValueError("Fonte de atributos Git inválida durante a revisão do diff.")
     except (OSError, subprocess.TimeoutExpired):
         raise ValueError("Não foi possível verificar atributos Git durante a revisão do diff.") from None
     if completed.returncode != 0:
@@ -1266,7 +1284,8 @@ def _safe_changed_paths() -> tuple[list[str], list[str], int, dict[str, str]]:
     head_attributes = _git_paths_attributes(candidates, source="HEAD")
     eligible = []
     excluded = []
-    attributes_mismatch = set()
+    unstaged_attribute_mismatch = set()
+    fully_excluded_attribute_mismatch = set()
     for path in candidates:
         if any(
             values.get(attribute, "unspecified").casefold() != "unspecified"
@@ -1278,9 +1297,15 @@ def _safe_changed_paths() -> tuple[list[str], list[str], int, dict[str, str]]:
         if any(
             attributes[path].get(attribute, "unspecified").casefold()
             != head_attributes[path].get(attribute, "unspecified").casefold()
-            for attribute in ("text", "eol", "crlf", "diff", "binary")
+            for attribute in ("diff", "binary", "ident")
         ):
-            attributes_mismatch.add(path)
+            fully_excluded_attribute_mismatch.add(path)
+        elif any(
+            attributes[path].get(attribute, "unspecified").casefold()
+            != head_attributes[path].get(attribute, "unspecified").casefold()
+            for attribute in ("text", "eol", "crlf")
+        ):
+            unstaged_attribute_mismatch.add(path)
         eligible.append(path)
 
     if eligible:
@@ -1301,9 +1326,11 @@ def _safe_changed_paths() -> tuple[list[str], list[str], int, dict[str, str]]:
         status = entry[:2]
         path = entry[3:]
         if status != "  " and path in allowed:
-            if path in attributes_mismatch:
+            if path in fully_excluded_attribute_mismatch:
                 excluded.append(path)
             else:
+                if path in unstaged_attribute_mismatch:
+                    excluded.append(path)
                 changed_statuses[path] = status
     return (
         sorted(changed_statuses), sorted(set(excluded)), excluded_candidate_count, changed_statuses,
@@ -1363,12 +1390,15 @@ def _redact_private_keys_from_file_versions(diff: str, sources: dict[str, Any]) 
 
 
 def _render_staged_diff_from_snapshot(
-    head: str, paths: list[str], sources: dict[str, Any],
+    head: str, paths: list[str], sources: dict[str, Any], *, intent_to_add_paths: list[str] | None = None,
 ) -> str:
     if not paths:
         return ""
     if re.fullmatch(r"[0-9a-f]{40,64}", head) is None:
         raise ValueError("HEAD inválido durante a renderização do snapshot staged.")
+    intent_to_add = set(intent_to_add_paths or [])
+    if not intent_to_add.issubset(paths):
+        raise ValueError("Snapshot staged intent-to-add inválido durante a revisão do diff.")
     root = REPO_ROOT.resolve()
     try:
         with tempfile.TemporaryDirectory(prefix="lotomaster-mcp-index-") as temporary:
@@ -1394,7 +1424,10 @@ def _render_staged_diff_from_snapshot(
                 if path not in sources:
                     raise ValueError("Snapshot staged incompleto durante a revisão do diff.")
                 index_source = sources[path][1]
-                if index_source is None:
+                head_source = sources[path][0]
+                if path in intent_to_add and head_source is None:
+                    continue
+                if index_source is None or path in intent_to_add:
                     index_info.append(
                         b"0 " + b"0" * len(head) + b" 0\t" + os.fsencode(path) + b"\0"
                     )
@@ -1452,13 +1485,18 @@ def _render_unstaged_diff_from_snapshot(
                 if path not in sources:
                     raise ValueError("Snapshot unstaged incompleto durante a revisão do diff.")
                 index_source = sources[path][1]
-                if path not in intent_to_add:
-                    if index_source is None:
+                head_source = sources[path][0]
+                if path in intent_to_add:
+                    if head_source is not None:
                         index_info.append(
                             b"0 " + b"0" * len(head) + b" 0\t" + os.fsencode(path) + b"\0"
                         )
-                    else:
-                        index_info.append(os.fsencode(index_source[0]) + b"\0")
+                elif index_source is None:
+                    index_info.append(
+                        b"0 " + b"0" * len(head) + b" 0\t" + os.fsencode(path) + b"\0"
+                    )
+                else:
+                    index_info.append(os.fsencode(index_source[0]) + b"\0")
 
                 worktree_source = sources[path][2]
                 if worktree_source is not None:
@@ -1472,7 +1510,7 @@ def _render_unstaged_diff_from_snapshot(
                 run_git(["update-index", "-z", "--index-info"], input_data=b"".join(index_info))
             if intent_to_add:
                 intent_paths = [f":(literal){path}" for path in sorted(intent_to_add)]
-                run_git(["add", "--intent-to-add", "--", *intent_paths])
+                run_git(["add", "--intent-to-add", "--force", "--", *intent_paths])
             literal_paths = [f":(literal){path}" for path in paths]
             diff = run_git([
                 "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames",
@@ -1507,10 +1545,14 @@ def _review_branch_diff(transport: str) -> dict[str, Any]:
         else:
             excluded_before = set(worktree_excluded_paths)
             excluded_after_set = set(excluded_after)
-            attribute_unrenderable = set(rechecked_excluded) & set(captured_paths)
+            attribute_excluded_captured = set(rechecked_excluded) & set(captured_paths)
+            attribute_unstaged_unrenderable = {
+                path for path in attribute_excluded_captured if path in status_after
+            }
+            attribute_fully_unrenderable = attribute_excluded_captured - attribute_unstaged_unrenderable
             status_unstable = {
                 path for path in captured_paths
-                if path not in attribute_unrenderable and status_after.get(path) != status_before.get(path)
+                if status_after.get(path) != status_before.get(path)
             }
             staged_unstable = set()
             unstaged_unstable = set()
@@ -1519,7 +1561,7 @@ def _review_branch_diff(transport: str) -> dict[str, Any]:
                     raise ValueError("Snapshot incompleto durante a revisão do diff.")
                 before = source_before[path]
                 after = source_after[path]
-                if path in status_unstable:
+                if path in status_unstable or path in attribute_fully_unrenderable:
                     staged_unstable.add(path)
                     unstaged_unstable.add(path)
                 if before[0] != after[0] or before[1] != after[1] or before[3] != after[3]:
@@ -1527,21 +1569,32 @@ def _review_branch_diff(transport: str) -> dict[str, Any]:
                     unstaged_unstable.add(path)
                 if before[2] != after[2] or (path in excluded_before) != (path in excluded_after_set):
                     unstaged_unstable.add(path)
-                if path in attribute_unrenderable:
+                if path in attribute_unstaged_unrenderable or path in attribute_fully_unrenderable:
                     unstaged_unstable.add(path)
             unstable_files = sorted(staged_unstable | unstaged_unstable)
             worktree_excluded = excluded_before
             intent_to_add_paths = {
                 path for path in captured_paths
-                if status_before[path][0] == " " and status_before[path][1] == "A"
-                and source_before[path][0] is None
+                if status_before[path][1] == "A"
+                and source_before[path][1] is not None and source_before[path][1][1] == b""
+                and (
+                    (
+                        status_before[path][0] == " " and source_before[path][0] is None
+                    )
+                    or (
+                        status_before[path][0] == "D" and source_before[path][0] is not None
+                    )
+                )
             }
             for path in captured_paths:
                 head_source, index_source, worktree_source, _attributes = source_before[path]
                 if (
                     path not in staged_unstable and status_before[path][0] != " "
                     and _tree_version_signature(head_source, indexed=False)
-                    != _tree_version_signature(index_source, indexed=True)
+                    != _tree_version_signature(
+                        None if path in intent_to_add_paths and status_before[path][0] == "D" else index_source,
+                        indexed=True,
+                    )
                 ):
                     staged_paths.append(path)
                 if (
@@ -1557,7 +1610,10 @@ def _review_branch_diff(transport: str) -> dict[str, Any]:
                 - worktree_excluded - set(unstable_files)
             )
             if staged_paths:
-                staged_diff = _render_staged_diff_from_snapshot(head_before, staged_paths, source_before)
+                staged_diff = _render_staged_diff_from_snapshot(
+                    head_before, staged_paths, source_before,
+                    intent_to_add_paths=sorted(intent_to_add_paths & set(staged_paths)),
+                )
                 if staged_diff:
                     diff_parts.append("Staged changes:\n" + staged_diff)
             if unstaged_paths:
