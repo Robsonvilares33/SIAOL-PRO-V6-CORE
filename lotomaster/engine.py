@@ -32,14 +32,18 @@ def latest_result(game: str, refresh: bool = True) -> dict:
         draw = {**draw, "_latest_checked_at": checked_at}
         _latest_cache[key] = (now, draw)
         return {**draw, "source": "CAIXA via Cloudflare Worker"}
-    except Exception as exc:
+    except Exception:
         cached_db = storage.latest_draw(key)
         if cached_db:
             cached_db = {k: v for k, v in cached_db.items() if k not in {"_latest_checked_at", "_known_latest_contest"}}
-            stale = {**cached_db, "source": "cache", "warning": f"A CAIXA está temporariamente indisponível: {exc}"}
+            stale = {
+                **cached_db,
+                "source": "cache",
+                "warning": "A CAIXA está temporariamente indisponível; o resultado em cache pode estar desatualizado.",
+            }
             _latest_cache[key] = (now, stale)
             return stale
-        raise RuntimeError(f"Não foi possível consultar a CAIXA para {spec['name']}: {exc}") from exc
+        raise RuntimeError("Não foi possível consultar a CAIXA.") from None
 
 
 def list_results(game: str, limit: int = 20, refresh_latest: bool = True) -> list[dict]:

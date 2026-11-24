@@ -120,8 +120,9 @@ class CaixaValidationTests(unittest.TestCase):
             patch("lotomaster.engine.fetch_draw", side_effect=ValueError("resultado inválido")),
             patch("lotomaster.engine.storage.save_draw") as save,
         ):
-            with self.assertRaisesRegex(RuntimeError, "resultado inválido"):
+            with self.assertRaisesRegex(RuntimeError, "Não foi possível consultar a CAIXA") as error:
                 latest_result("megasena", refresh=True)
+            self.assertNotIn("resultado inválido", str(error.exception))
         save.assert_not_called()
 
 

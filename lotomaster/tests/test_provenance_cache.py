@@ -7,6 +7,7 @@ from lotomaster.api import app
 
 DRAW = {"game": "megasena", "contest": 50, "numbers": [1, 2, 3, 4, 5, 6]}
 TICKETS = [{"numbers": [1, 2, 3, 4, 7, 8]}]
+CACHE_WARNING = "A CAIXA está temporariamente indisponível; o resultado em cache pode estar desatualizado."
 
 
 class ProvenanceTests(unittest.TestCase):
@@ -41,18 +42,34 @@ class ProvenanceTests(unittest.TestCase):
                 self.assertEqual(result.json()['provenance']['kind'], 'client_supplied')
                 self.assertFalse(result.json()['provenance']['verified'])
 
-    def test_warning_survives_memory_ttl_and_results(self):
-        with patch("lotomaster.engine.storage.latest_draw", return_value=DRAW), patch("lotomaster.engine.storage.list_draws_range", return_value=[DRAW]), patch("lotomaster.engine.fetch_draw", side_effect=OSError("offline")) as fetch:
+    def test_warning_survives_memory_ttl_and_results_without_provider_details(self):
+        sentinel = "/srv/private/provider-token-and-config"
+        with patch("lotomaster.engine.storage.latest_draw", return_value=DRAW), patch("lotomaster.engine.storage.list_draws_range", return_value=[DRAW]), patch("lotomaster.engine.fetch_draw", side_effect=OSError(sentinel)) as fetch:
             first = engine.latest_result('megasena', refresh=True)
             second = engine.latest_result('megasena', refresh=False)
             third = engine.list_results('megasena', limit=1, refresh_latest=False)[0]
         self.assertEqual(fetch.call_count, 1)
         for row in (first, second, third):
-            self.assertIn('offline', row['warning'])
+            self.assertEqual(row['warning'], CACHE_WARNING)
+            self.assertNotIn(sentinel, row['warning'])
             self.assertEqual(row['source'], 'cache')
-        with patch('lotomaster.api.list_results', return_value=[third]):
-            result = self.client.get('/api/v1/megasena/results?limit=1').json()
-        self.assertIn('offline', result['warning'])
+        with patch('lotomaster.api.latest_result', return_value=third), \
+             patch('lotomaster.api.list_results', return_value=[third]), \
+             patch('lotomaster.api.build_assistant_report', return_value={"draws_analyzed": 1}):
+            for endpoint in ("latest", "results?limit=1", "assistant?limit=1"):
+                response = self.client.get(f"/api/v1/megasena/{endpoint}")
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["warning"], CACHE_WARNING)
+                self.assertNotIn(sentinel, response.text)
+
+    def test_failed_latest_lookup_without_cache_does_not_echo_provider_exception(self):
+        sentinel = "/srv/private/provider-token-and-config"
+        with patch("lotomaster.engine.fetch_draw", side_effect=OSError(sentinel)), \
+             patch("lotomaster.engine.storage.latest_draw", return_value=None):
+            response = self.client.get("/api/v1/megasena/latest")
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["detail"], "Não foi possível obter o resultado mais recente.")
+        self.assertNotIn(sentinel, response.text)
 
     def test_success_after_expiry_clears_warning(self):
         with patch('lotomaster.engine.storage.latest_draw', return_value=DRAW), patch('lotomaster.engine.storage.save_draw'), patch('lotomaster.engine.fetch_draw', side_effect=[OSError('offline'), {**DRAW, 'contest': 51}]), patch('lotomaster.engine.time.monotonic', side_effect=[100, 191]):

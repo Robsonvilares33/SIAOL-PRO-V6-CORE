@@ -35,6 +35,7 @@ app = FastAPI(
     version="0.1.0",
     docs_url="/api/docs",
     redoc_url=None,
+    debug=False,
 )
 app.add_middleware(DrawBodyLimit)
 

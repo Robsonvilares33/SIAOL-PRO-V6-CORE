@@ -17,6 +17,7 @@ class LotomasterApiTests(unittest.TestCase):
         cls.client = TestClient(app)
 
     def test_health_and_catalog(self):
+        self.assertFalse(app.debug)
         health = self.client.get("/api/v1/health")
         self.assertEqual(health.status_code, 200)
         self.assertEqual(health.json()["official_results_source"], "API pública da CAIXA")

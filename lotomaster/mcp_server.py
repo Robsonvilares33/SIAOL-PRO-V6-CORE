@@ -335,6 +335,20 @@ def _redact_private_key_blocks(text: str) -> str:
     return "".join(output)
 
 
+def _scan_quoted_value(text: str, start: int) -> tuple[int, str, bool]:
+    quote = text[start]
+    delimiter = quote * 3 if text.startswith(quote * 3, start) else quote
+    cursor = start + len(delimiter)
+    while cursor < len(text):
+        if text[cursor] == "\\":
+            cursor += 2
+        elif text.startswith(delimiter, cursor):
+            return cursor + len(delimiter), delimiter, False
+        else:
+            cursor += 1
+    return len(text), delimiter, True
+
+
 def _redact_sensitive_key_values(text: str) -> str:
     output = []
     cursor = 0
@@ -356,19 +370,16 @@ def _redact_sensitive_key_values(text: str) -> str:
 
         quote = text[value_start] if text[value_start] in "\"'" else None
         malformed_quote = False
+        delimiter = quote
         if quote:
-            value_end = value_start + 1
-            while value_end < len(text):
-                if text[value_end] == "\\":
-                    value_end += 2
-                elif text[value_end] == quote:
-                    value_end += 1
+            value_end, delimiter, malformed_quote = _scan_quoted_value(text, value_start)
+            while not malformed_quote:
+                next_start = value_end
+                while next_start < len(text) and text[next_start].isspace():
+                    next_start += 1
+                if next_start >= len(text) or text[next_start] not in "\"'":
                     break
-                else:
-                    value_end += 1
-            else:
-                value_end = len(text)
-                malformed_quote = True
+                value_end, _next_delimiter, malformed_quote = _scan_quoted_value(text, next_start)
         else:
             value_end = value_start
 
@@ -379,7 +390,8 @@ def _redact_sensitive_key_values(text: str) -> str:
             continue
         output.append(text[cursor:value_start])
         if quote:
-            output.append(f"{quote}[REDACTED]" + ("" if malformed_quote else quote))
+            output.append(f"{delimiter}[REDACTED]" + ("" if malformed_quote else delimiter))
+            output.append("\n" * text[value_start:value_end].count("\n"))
         else:
             output.append("[REDACTED]")
         cursor = value_end
@@ -920,7 +932,7 @@ def _read_project_file_bytes(relative: Path) -> bytes:
                     pass
 
 
-def _open_editable_file(requested: Any):
+def _editable_path_components(requested: Any) -> list[str]:
     if not isinstance(requested, str) or not requested or len(requested) > 512:
         raise ValueError("Informe um caminho relativo válido sob lotomaster/.")
     parts = requested.split("/")
@@ -941,6 +953,15 @@ def _open_editable_file(requested: Any):
         or any(marker in filename for marker in ("secret", "credential", "password", "private_key"))
     ):
         raise ValueError("Esse arquivo não está no conjunto permitido para edição.")
+    for entry in _project_file_index():
+        candidate = entry.get("path")
+        if isinstance(candidate, str) and candidate == requested and _is_editable_branch_path(candidate):
+            return candidate.split("/")
+    raise ValueError("Arquivo inexistente, inacessível ou fora do escopo permitido.")
+
+
+def _open_editable_file(requested: Any):
+    parts = _editable_path_components(requested)
     if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NONBLOCK"):
         raise ValueError("O sistema não oferece abertura segura de caminhos; a edição foi bloqueada.")
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW

@@ -262,6 +262,25 @@ class MCPReadOnlyTests(unittest.TestCase):
         malformed = mcp_server._redact_sensitive_text('api_key = "private value without a closing quote')
         self.assertNotIn("private value", malformed)
 
+    def test_read_project_file_redacts_adjacent_and_triple_quoted_credentials(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repo"
+            root.mkdir()
+            (root / "app.py").write_text(
+                'password = "first-secret""adjacent secret"""\n'
+                'api_key = """triple-secret\nstill secret"""\n'
+                'description = "ordinary text"\n',
+                encoding="utf-8",
+            )
+            with patch.object(mcp_server, "REPO_ROOT", root):
+                result = mcp_server._tool_result("read_project_file", {"path": "app.py"})
+        content = result["content"]
+        for secret in ("first-secret", "adjacent secret", "triple-secret", "still secret"):
+            self.assertNotIn(secret, content)
+        self.assertEqual(result["total_lines"], 4)
+        self.assertIn('description = "ordinary text"', content)
+        self.assertIn("[REDACTED]", content)
+
     def test_redaction_handles_repeated_private_key_markers_without_backtracking(self):
         complete = "-----BEGIN RSA PRIVATE KEY-----\nsecret material\n-----END RSA PRIVATE KEY-----"
         redacted = mcp_server._redact_sensitive_text(complete)
@@ -426,7 +445,7 @@ class MCPBranchEditTests(unittest.TestCase):
         )
         result = self._bounded_fifo_child(root, script)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("arquivo regular", result.stdout)
+        self.assertIn("Arquivo inexistente", result.stdout)
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO requer suporte POSIX")
     def test_edit_rejects_fifo_on_reopen_without_blocking(self):
@@ -1412,6 +1431,17 @@ class MCPBranchEditTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Arquivo inexistente"):
                 mcp_server._tool_result("edit_branch_file", {
                     "path": "lotomaster/link.py", "expected_sha256": hashlib.sha256(outside.read_bytes()).hexdigest(), "content": "bad\n",
+                }, transport="stdio")
+            outside_directory = root / "outside-directory"
+            outside_directory.mkdir()
+            outside_target = outside_directory / "target.py"
+            outside_target.write_text("outside\n", encoding="utf-8")
+            (root / "lotomaster" / "linked-directory").symlink_to(outside_directory, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "Arquivo inexistente"):
+                mcp_server._tool_result("edit_branch_file", {
+                    "path": "lotomaster/linked-directory/target.py",
+                    "expected_sha256": hashlib.sha256(outside_target.read_bytes()).hexdigest(),
+                    "content": "bad\n",
                 }, transport="stdio")
             hardlink = root / "lotomaster" / "hardlink.py"
             os.link(target, hardlink)

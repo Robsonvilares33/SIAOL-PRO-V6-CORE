@@ -60,8 +60,11 @@ class LatestResultCacheTests(unittest.TestCase):
         fetch.assert_called_once_with("megasena")
         self.assertEqual(result["contest"], 100)
         self.assertEqual(result["source"], "cache")
-        self.assertIn("CAIXA está temporariamente indisponível", result["warning"])
-        self.assertIn("rede indisponível", result["warning"])
+        self.assertEqual(
+            result["warning"],
+            "A CAIXA está temporariamente indisponível; o resultado em cache pode estar desatualizado.",
+        )
+        self.assertNotIn("rede indisponível", result["warning"])
 
 
 if __name__ == "__main__":
