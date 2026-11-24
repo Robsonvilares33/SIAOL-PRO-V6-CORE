@@ -224,6 +224,23 @@ class MCPReadOnlyTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "permanecer dentro"):
                     mcp_server._tool_result("read_project_file", {"path": "../outside.txt"})
 
+    def test_read_project_file_rejects_symlinked_parent_and_hard_links(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repo"
+            outside = Path(directory) / "outside"
+            root.mkdir()
+            outside.mkdir()
+            secret = outside / "private.py"
+            secret.write_text("outside secret contents", encoding="utf-8")
+            (root / "linked").symlink_to(outside, target_is_directory=True)
+            os.link(secret, root / "hardlink.py")
+
+            with patch.object(mcp_server, "REPO_ROOT", root):
+                with self.assertRaisesRegex(ValueError, "fora do escopo"):
+                    mcp_server._tool_result("read_project_file", {"path": "linked/private.py"})
+                with self.assertRaisesRegex(ValueError, "links adicionais"):
+                    mcp_server._tool_result("read_project_file", {"path": "hardlink.py"})
+
     def test_redaction_covers_auth_headers_and_query_tokens(self):
         secret = "generic_token_value_0123456789abcdefghijklmnopqrstuvwxyz"
         source = (
@@ -236,6 +253,22 @@ class MCPReadOnlyTests(unittest.TestCase):
         self.assertIn("Authorization: [REDACTED]", result)
         self.assertIn("access_token=[REDACTED]", result)
         self.assertIn("https://modelcontextprotocol.io/specification/2025-11-25/basic/transports", result)
+
+    def test_redaction_preserves_quoted_values_and_masks_unterminated_values(self):
+        valid = mcp_server._redact_sensitive_text('{"api_key": "private value"}')
+        self.assertIn('"api_key": "[REDACTED]"', valid)
+        self.assertNotIn("private value", valid)
+
+        malformed = mcp_server._redact_sensitive_text('api_key = "private value without a closing quote')
+        self.assertNotIn("private value", malformed)
+
+    def test_redaction_handles_repeated_private_key_markers_without_backtracking(self):
+        complete = "-----BEGIN RSA PRIVATE KEY-----\nsecret material\n-----END RSA PRIVATE KEY-----"
+        redacted = mcp_server._redact_sensitive_text(complete)
+        self.assertEqual(redacted, "[REDACTED PRIVATE KEY BLOCK]")
+
+        incomplete = "-----BEGIN PRIVATE KEY-----\n" * 5000
+        self.assertEqual(mcp_server._redact_sensitive_text(incomplete), incomplete)
 
     def test_analyze_games_is_bounded_and_non_persistent(self):
         with tempfile.TemporaryDirectory() as directory:

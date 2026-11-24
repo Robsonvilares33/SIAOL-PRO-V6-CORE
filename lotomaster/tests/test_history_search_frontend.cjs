@@ -54,12 +54,12 @@ test('busca exata envia o critério escolhido ao backend e identifica o resultad
 });
 test('valores hostis nos resultados são escapados e a edição invalida a pesquisa sem fetch',()=>{
   const {context,elements,calls}=harness({'#history-number-search-numbers':'1','#history-number-search-mode':'50'});
-  context.response={matching_draws:[{contest:'<img src=x onerror=alert(1)>',draw_date:'<script>x</script>',numbers:[1,2,3]}],match_count:1,examined_count:1,disclaimer:'<b>unsafe</b>'};
+  context.response={matching_draws:[{contest:'<img src=x onerror=alert(1)>',draw_date:'<SCRIPT>x</SCRIPT>',numbers:[1,2,3]}],match_count:1,examined_count:1,disclaimer:'<b>unsafe</b>'};
   context.complete={complete:false,missingCount:1,periodLabel:'x'};
   const html=vm.runInContext('renderHistoryNumberSearchResult(response,complete)',context);
-  assert.doesNotMatch(html,/<img|<script>|<b>unsafe/);
+  assert.doesNotMatch(html,/<img|<script>|<b>unsafe/i);
   assert.match(html,/&lt;img/);
-  assert.match(html,/&lt;script&gt;/);
+  assert.match(html,/&lt;SCRIPT&gt;/);
   elements['#history-number-search-result'].innerHTML='resultado antigo';
   vm.runInContext("historyNumberSearchController={abort(){globalThis.wasAborted=true}};invalidateHistoryNumberSearch()",context);
   assert.match(elements['#history-number-search-result'].innerHTML,/desatualizado/);

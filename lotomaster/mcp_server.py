@@ -88,8 +88,10 @@ EXCLUDED_PROJECT_DIRS = {
     ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache", "build",
     "dist", "target", "site-packages", "coverage",
 }
-_SENSITIVE_KV = re.compile(
-    r'''(?im)(?P<prefix>["']?[A-Za-z0-9_.-]*(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|secret|token|key|password|passwd|credential|private[_-]?key|authorization|bearer|cookie|username)["']?\s*(?:=|:)\s*)(?:(?P<quoted>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|(?P<bare>[^,\s;#}]+))'''
+_SENSITIVE_FIELD_NAME = re.compile(
+    r"(?i)(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|"
+    r"private[_-]?key|authorization|credential|password|passwd|username|cookie|"
+    r"bearer|secret|token|key)"
 )
 _BEARER_VALUE = re.compile(r"(?i)(\bBearer\s+)[A-Za-z0-9._~+/_-]{24,}={0,2}")
 _AUTH_VALUE = re.compile(r"(?im)(?P<prefix>\b(?:authorization|proxy-authorization)\b\s*[:=]\s*)(?:Bearer|Basic|Token|OAuth)\s+[^\s,;]+")
@@ -101,9 +103,6 @@ _KNOWN_TOKEN = re.compile(
     r"sk_(?:live|test)_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_-]{30,}|AKIA[0-9A-Z]{16})"
 )
 _OPAQUE_LONG_TOKEN = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9._~+_-]{32,}={0,2}(?![A-Za-z0-9])")
-_PRIVATE_KEY_BLOCK = re.compile(
-    r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL
-)
 
 _SERVER_RESOURCE = "lotomaster://overview"
 _RESOURCE_TEXT = """Lotomaster MCP — visão segura do sistema
@@ -284,21 +283,119 @@ def _resolve_spec(game: Any) -> dict[str, Any]:
         raise ValueError("Modalidade não encontrada.") from None
 
 
+def _valid_private_key_label(label: str) -> bool:
+    return label.endswith("PRIVATE KEY") and all("A" <= char <= "Z" or char == " " for char in label)
+
+
+def _private_key_block_spans(text: str):
+    begin_prefix = "-----BEGIN "
+    end_prefix = "-----END "
+    delimiter = "-----"
+    cursor = 0
+    while cursor < len(text):
+        start = text.find(begin_prefix, cursor)
+        if start < 0:
+            break
+        header_end = text.find(delimiter, start + len(begin_prefix))
+        if header_end < 0:
+            break
+        if not _valid_private_key_label(text[start + len(begin_prefix):header_end]):
+            cursor = start + len(begin_prefix)
+            continue
+
+        search_from = header_end + len(delimiter)
+        block_end = None
+        while True:
+            end_start = text.find(end_prefix, search_from)
+            if end_start < 0:
+                break
+            footer_end = text.find(delimiter, end_start + len(end_prefix))
+            if footer_end < 0:
+                break
+            if _valid_private_key_label(text[end_start + len(end_prefix):footer_end]):
+                block_end = footer_end + len(delimiter)
+                break
+            search_from = end_start + len(end_prefix)
+
+        if block_end is None:
+            break
+        yield start, block_end
+        cursor = block_end
+
+
+def _redact_private_key_blocks(text: str) -> str:
+    replacement = "[REDACTED PRIVATE KEY BLOCK]"
+    output = []
+    cursor = 0
+    for start, block_end in _private_key_block_spans(text):
+        output.append(text[cursor:start])
+        output.append(replacement)
+        cursor = block_end
+    output.append(text[cursor:])
+    return "".join(output)
+
+
+def _redact_sensitive_key_values(text: str) -> str:
+    output = []
+    cursor = 0
+    for match in _SENSITIVE_FIELD_NAME.finditer(text):
+        if match.start() < cursor:
+            continue
+        value_start = match.end()
+        if value_start < len(text) and text[value_start] in "\"'":
+            value_start += 1
+        while value_start < len(text) and text[value_start].isspace():
+            value_start += 1
+        if value_start >= len(text) or text[value_start] not in "=:":
+            continue
+        value_start += 1
+        while value_start < len(text) and text[value_start].isspace():
+            value_start += 1
+        if value_start >= len(text):
+            continue
+
+        quote = text[value_start] if text[value_start] in "\"'" else None
+        malformed_quote = False
+        if quote:
+            value_end = value_start + 1
+            while value_end < len(text):
+                if text[value_end] == "\\":
+                    value_end += 2
+                elif text[value_end] == quote:
+                    value_end += 1
+                    break
+                else:
+                    value_end += 1
+            else:
+                value_end = len(text)
+                malformed_quote = True
+        else:
+            value_end = value_start
+
+        if value_end == value_start:
+            while value_end < len(text) and not text[value_end].isspace() and text[value_end] not in ",;#}":
+                value_end += 1
+        if value_end == value_start:
+            continue
+        output.append(text[cursor:value_start])
+        if quote:
+            output.append(f"{quote}[REDACTED]" + ("" if malformed_quote else quote))
+        else:
+            output.append("[REDACTED]")
+        cursor = value_end
+    output.append(text[cursor:])
+    return "".join(output)
+
+
 def _redact_sensitive_text(text: str) -> str:
     text = _AUTH_VALUE.sub(lambda match: f"{match.group('prefix')}[REDACTED]", text)
     text = _BEARER_VALUE.sub(r"\1[REDACTED]", text)
     text = _URL_CREDENTIALS.sub(r"\1[REDACTED]@", text)
-    text = _SENSITIVE_KV.sub(
-        lambda match: (
-            f"{match.group('prefix')}{match.group('quoted')[0]}[REDACTED]{match.group('quoted')[0]}"
-            if match.group("quoted") is not None else f"{match.group('prefix')}[REDACTED]"
-        ),
-        text,
-    )
+    text = _redact_sensitive_key_values(text)
     text = _QUERY_SECRET.sub(r"\1[REDACTED]", text)
     text = _KNOWN_TOKEN.sub("[REDACTED]", text)
     text = _OPAQUE_LONG_TOKEN.sub("[REDACTED]", text)
-    return _PRIVATE_KEY_BLOCK.sub("[REDACTED PRIVATE KEY BLOCK]", text)
+    return _redact_private_key_blocks(text)
 
 
 def _redact_response_value(value: Any, *, preserve_digest_fields: bool = False) -> Any:
@@ -328,22 +425,32 @@ def _has_sensitive_path_component(parts: Any) -> bool:
     return False
 
 
-def _is_safe_project_file(path: Path) -> bool:
-    if path.is_symlink() or not path.is_file() or path.suffix.lower() not in PROJECT_TEXT_EXTENSIONS:
+def _is_safe_project_relative_path(relative: Path) -> bool:
+    if relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
         return False
-    relative = path.relative_to(REPO_ROOT)
     if (
         any(part.startswith(".") or part.lower() in EXCLUDED_PROJECT_DIRS for part in relative.parts)
         or _has_sensitive_path_component(relative.parts)
     ):
         return False
-    filename = path.name.casefold()
+    filename = relative.name.casefold()
     if filename.startswith("manus_") or any(
         marker in filename for marker in ("secret", "credential", "password", "private_key")
     ):
         return False
+    return relative.suffix.lower() in PROJECT_TEXT_EXTENSIONS
+
+
+def _is_safe_project_file(path: Path) -> bool:
     try:
-        return path.stat().st_size <= MAX_PROJECT_FILE_BYTES
+        relative = path.relative_to(REPO_ROOT)
+    except ValueError:
+        return False
+    if not _is_safe_project_relative_path(relative):
+        return False
+    try:
+        information = path.lstat()
+        return stat.S_ISREG(information.st_mode) and information.st_size <= MAX_PROJECT_FILE_BYTES
     except OSError:
         return False
 
@@ -403,19 +510,12 @@ def _read_project_file(arguments: dict[str, Any], *, transport: str = "") -> dic
     relative = Path(normalized)
     if relative.is_absolute() or any(part in {".", ".."} for part in relative.parts):
         raise ValueError("O caminho precisa permanecer dentro do repositório.")
-    root = REPO_ROOT.resolve()
-    candidate = root / relative
-    try:
-        resolved = candidate.resolve(strict=True)
-        resolved.relative_to(root)
-    except (OSError, ValueError):
-        raise ValueError("Arquivo fora do escopo, inexistente ou inacessível.") from None
-    if not _is_safe_project_file(resolved):
+    if not _is_safe_project_relative_path(relative):
         raise ValueError("Esse arquivo não está no conjunto permitido de leitura.")
     start_line = _require_int(arguments.get("start_line", 1), "start_line", 1, 2**31 - 1)
     max_lines = _require_int(arguments.get("max_lines", 200), "max_lines", 1, 400)
     try:
-        raw = resolved.read_bytes()
+        raw = _read_project_file_bytes(relative)
         if b"\x00" in raw:
             raise ValueError("Arquivo binário não pode ser lido por esta ferramenta.")
         text = raw.decode("utf-8-sig")
@@ -428,7 +528,7 @@ def _read_project_file(arguments: dict[str, Any], *, transport: str = "") -> dic
     selected = lines[start_line - 1:start_line - 1 + max_lines]
     end_line = start_line + len(selected) - 1 if selected else start_line - 1
     result = {
-        "path": resolved.relative_to(root).as_posix(),
+        "path": relative.as_posix(),
         "start_line": start_line,
         "end_line": end_line,
         "total_lines": len(lines),
@@ -769,6 +869,55 @@ def _read_fd_limited(file_fd: int, limit: int = MAX_PROJECT_FILE_BYTES) -> bytes
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
+
+
+def _read_project_file_bytes(relative: Path) -> bytes:
+    if (
+        not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY")
+        or not hasattr(os, "O_NONBLOCK") or os.open not in os.supports_dir_fd
+    ):
+        raise ValueError("O sistema não oferece abertura segura de caminhos; a leitura foi bloqueada.")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    root_fd = parent_fd = file_fd = None
+    try:
+        root_fd = os.open(REPO_ROOT.resolve(), directory_flags)
+        parent_fd = os.dup(root_fd)
+        for part in relative.parts[:-1]:
+            next_fd = os.open(part, directory_flags, dir_fd=parent_fd)
+            previous_fd = parent_fd
+            parent_fd = next_fd
+            os.close(previous_fd)
+        file_fd = os.open(relative.parts[-1], file_flags, dir_fd=parent_fd)
+        before = os.fstat(file_fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise ValueError("Só é permitido ler arquivo regular sem links adicionais.")
+        if before.st_size > MAX_PROJECT_FILE_BYTES:
+            raise ValueError("O arquivo excede o limite de tamanho permitido.")
+        raw = _read_fd_limited(file_fd)
+        after = os.fstat(file_fd)
+        before_signature = (
+            before.st_dev, before.st_ino, before.st_mode, before.st_nlink,
+            before.st_size, before.st_mtime_ns, before.st_ctime_ns,
+        )
+        after_signature = (
+            after.st_dev, after.st_ino, after.st_mode, after.st_nlink,
+            after.st_size, after.st_mtime_ns, after.st_ctime_ns,
+        )
+        if len(raw) > MAX_PROJECT_FILE_BYTES or len(raw) != before.st_size or before_signature != after_signature:
+            raise ValueError("O arquivo mudou durante a leitura segura.")
+        return raw
+    except ValueError:
+        raise
+    except OSError:
+        raise ValueError("Arquivo fora do escopo, inexistente ou inacessível.") from None
+    finally:
+        for descriptor in (file_fd, parent_fd, root_fd):
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
 
 
 def _open_editable_file(requested: Any):
@@ -1372,8 +1521,8 @@ def _redact_private_keys_from_file_versions(diff: str, sources: dict[str, Any]) 
                 continue
             raw = version[1]
             text = raw.decode("utf-8-sig", errors="strict")
-            for match in _PRIVATE_KEY_BLOCK.finditer(text):
-                sensitive_lines.update(line for line in match.group(0).splitlines() if line)
+            for start, end in _private_key_block_spans(text):
+                sensitive_lines.update(line for line in text[start:end].splitlines() if line)
     if not sensitive_lines:
         return diff
     redacted_lines = []

@@ -156,8 +156,8 @@ def game_latest(game: str):
         return latest_result(spec["key"])
     except KeyError:
         raise HTTPException(status_code=404, detail="Modalidade não encontrada.")
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+    except Exception:
+        raise HTTPException(status_code=502, detail="Não foi possível obter o resultado mais recente.") from None
 
 
 @app.get("/api/v1/{game}/results")
@@ -178,8 +178,8 @@ def game_results(game: str, limit: int = Query(default=20, ge=1, le=300)):
         return {"game": spec["key"], "name": spec["name"], "items": items, "count": len(items), "source": "CAIXA via Worker e cache do servidor", "expected_count": expected, "partial": len(present) < expected, "provenance": {"latest_lookup": "server_fetch" if source == "CAIXA via Cloudflare Worker" else "server_cache" if source == "cache" else "unknown", "recently_checked": fresh, "verified": False, **({"last_successful_lookup_at": checked_at} if checked_at else {})}, **({"warning": warning} if warning else {})}
     except KeyError:
         raise HTTPException(status_code=404, detail="Modalidade não encontrada.")
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+    except Exception:
+        raise HTTPException(status_code=502, detail="Não foi possível consultar os resultados.") from None
 
 
 @app.get("/api/v1/{game}/history")
@@ -195,8 +195,8 @@ def game_history(
         return {"game": spec["key"], "name": spec["name"], "source": "CAIXA via Worker e cache do servidor", **page}
     except KeyError:
         raise HTTPException(status_code=404, detail="Modalidade não encontrada.")
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+    except Exception:
+        raise HTTPException(status_code=502, detail="Não foi possível consultar o histórico.") from None
 
 
 @app.post("/api/v1/{game}/statistics/from-draws")
@@ -274,8 +274,8 @@ def game_assistant(
         return report
     except KeyError:
         raise HTTPException(status_code=404, detail="Modalidade não encontrada.")
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+    except Exception:
+        raise HTTPException(status_code=502, detail="Não foi possível gerar o relatório do assistente.") from None
 
 
 @app.post("/api/v1/{game}/assistant/from-draws")

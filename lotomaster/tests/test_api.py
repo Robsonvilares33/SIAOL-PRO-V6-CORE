@@ -27,6 +27,21 @@ class LotomasterApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["count"], 9)
 
+    def test_public_read_endpoints_hide_internal_exception_messages(self):
+        sentinel = "/srv/private/config-and-provider-details"
+        cases = [
+            ("/api/v1/megasena/latest", "lotomaster.api.latest_result", "Não foi possível obter o resultado mais recente."),
+            ("/api/v1/megasena/results", "lotomaster.api.list_results", "Não foi possível consultar os resultados."),
+            ("/api/v1/megasena/history", "lotomaster.api.list_history_page", "Não foi possível consultar o histórico."),
+            ("/api/v1/megasena/assistant", "lotomaster.api.list_results", "Não foi possível gerar o relatório do assistente."),
+        ]
+        for endpoint, dependency, expected_detail in cases:
+            with self.subTest(endpoint=endpoint), patch(dependency, side_effect=RuntimeError(sentinel)):
+                response = self.client.get(endpoint)
+            self.assertEqual(response.status_code, 502, response.text)
+            self.assertEqual(response.json()["detail"], expected_detail)
+            self.assertNotIn(sentinel, response.text)
+
     def test_ai_configuration_asset_is_served_with_application(self):
         page = self.client.get("/")
         module = self.client.get("/assets/ai-assistant.js")
