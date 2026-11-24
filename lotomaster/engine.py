@@ -37,6 +37,7 @@ def latest_result(game: str, refresh: bool = True) -> dict:
                 concurrent_mem is not None
                 and concurrent_mem is not cached_mem
                 and concurrent_mem[1].get("_latest_checked_at")
+                and int(concurrent_mem[1]["contest"]) >= int(draw["contest"])
             ):
                 return {**concurrent_mem[1], "source": "CAIXA via Cloudflare Worker"}
             _latest_cache[key] = (now, draw)

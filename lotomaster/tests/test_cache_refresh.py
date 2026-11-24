@@ -112,6 +112,64 @@ class LatestResultCacheTests(unittest.TestCase):
         self.assertEqual(stale_result["result"]["source"], "CAIXA via Cloudflare Worker")
         self.assertEqual(engine._latest_cache["megasena"][1]["contest"], 101)
 
+    def _run_overlapping_successful_refreshes(self, delayed_draw, fast_draw):
+        engine._latest_cache.clear()
+        delayed_at_save = threading.Event()
+        release_delayed_save = threading.Event()
+        delayed_result = {}
+
+        def fetch_draw(_game):
+            if threading.current_thread().name == "delayed-refresh":
+                return delayed_draw
+            return fast_draw
+
+        def save_draw(_draw):
+            if threading.current_thread().name == "delayed-refresh":
+                delayed_at_save.set()
+                if not release_delayed_save.wait(timeout=3):
+                    raise TimeoutError("save_draw test barrier timed out")
+
+        def run_delayed_refresh():
+            try:
+                delayed_result["result"] = engine.latest_result("megasena", refresh=True)
+            except Exception as error:
+                delayed_result["error"] = error
+
+        with (
+            patch("lotomaster.engine.fetch_draw", side_effect=fetch_draw),
+            patch("lotomaster.engine.storage.save_draw", side_effect=save_draw),
+        ):
+            thread = threading.Thread(target=run_delayed_refresh, name="delayed-refresh")
+            thread.start()
+            try:
+                self.assertTrue(delayed_at_save.wait(timeout=2))
+                fast_result = engine.latest_result("megasena", refresh=True)
+            finally:
+                release_delayed_save.set()
+                thread.join(timeout=3)
+
+        self.assertFalse(thread.is_alive())
+        self.assertNotIn("error", delayed_result)
+        return delayed_result["result"], fast_result
+
+    def test_older_success_finishing_after_newer_keeps_newer(self):
+        older = {"contest": 100, "numbers": [1, 2, 3]}
+        newer = {"contest": 101, "numbers": [4, 5, 6]}
+        delayed_result, fast_result = self._run_overlapping_successful_refreshes(older, newer)
+
+        self.assertEqual(fast_result["contest"], 101)
+        self.assertEqual(delayed_result["contest"], 101)
+        self.assertEqual(engine._latest_cache["megasena"][1]["contest"], 101)
+
+    def test_newer_success_finishing_after_older_replaces_older(self):
+        older = {"contest": 100, "numbers": [1, 2, 3]}
+        newer = {"contest": 101, "numbers": [4, 5, 6]}
+        delayed_result, fast_result = self._run_overlapping_successful_refreshes(newer, older)
+
+        self.assertEqual(fast_result["contest"], 100)
+        self.assertEqual(delayed_result["contest"], 101)
+        self.assertEqual(engine._latest_cache["megasena"][1]["contest"], 101)
+
 
 if __name__ == "__main__":
     unittest.main()
