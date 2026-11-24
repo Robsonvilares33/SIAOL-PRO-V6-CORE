@@ -978,7 +978,7 @@ def _editable_path_components(requested: Any) -> list[str]:
                 and _is_safe_project_file(path)
                 and _is_editable_branch_path(candidate)
             ):
-                return parts
+                return candidate.split("/")
     raise ValueError("Arquivo inexistente, inacessível ou fora do escopo permitido.")
 
 
