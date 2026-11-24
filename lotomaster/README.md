@@ -147,6 +147,8 @@ Ferramentas do modo padrão: catálogo e regras; leitura paginada do histórico 
 
 Por padrão, o MCP não escreve arquivos, jogos, estudos ou bancos; não atualiza dados, acessa serviços externos ou credenciais, opera contas, aposta, publica nem envia dados a terceiros. Jogos salvos no `localStorage` de outro navegador não ficam automaticamente visíveis ao processo MCP; jogos precisam ser fornecidos para análise. Históricos podem estar incompletos e sua origem não é autenticada. Estatísticas e conferências retrospectivas não são previsões.
 
+O transporte HTTP limita a oito requisições simultâneas e responde 503 quando os slots estão ocupados. Esse limite local reduz pressão de recursos, mas não substitui limites de taxa, quotas ou proteção contra abuso no proxy reverso.
+
 #### Editor local opcional, somente na branch autorizada
 
 O editor vem **desativado**. Para disponibilizá-lo a um subprocesso local, defina explicitamente a variável abaixo antes de iniciar o MCP por `stdio`:
@@ -159,5 +161,7 @@ python3 -m lotomaster.mcp_server --transport stdio
 Com a opção ligada, `edit_branch_file` só substitui arquivos de código permitidos sob `lotomaster/` ou o README funcional, apenas na branch `feature/lotomaster-public-parity`, e exige o SHA-256 atual. Avaliações, mapeamentos e estudos congelados — inclusive caminhos identificados como estudos ou experimentos — ficam fora do escopo. Caminhos absolutos, traversal, symlinks, hard links, arquivos ocultos, credenciais e binários são bloqueados. Não se criam novos arquivos de projeto nem se apagam arquivos; a substituição atômica usa um arquivo temporário transitório no mesmo diretório.
 
 `review_branch_diff` mostra alterações locais staged/unstaged do escopo, com padrões conhecidos de segredo redigidos; para arquivos não rastreados, mostra somente os nomes, não o conteúdo. `run_branch_checks` executa os testes `unittest` do Lotomaster, análise de sintaxe Python sem bytecode, `node --check` nos dois arquivos JavaScript fixos e `git diff --check`. Os testes usam SQLite temporário removido ao final e um ambiente sem as chaves do processo; executar testes ainda executa código do checkout com as permissões locais do processo.
+
+As gravações do editor são best-effort sob concorrência: mantenha o checkout exclusivo durante a edição. A branch é capturada no início da chamada e pode não corresponder à branch no instante da gravação.
 
 O editor não oferece comandos de commit, push, merge ou deploy, e não escreve no banco de histórico, jogos ou estudos. O transporte HTTP continua somente leitura, mesmo se a variável de opt-in estiver definida. Revise o diff antes de qualquer outra etapa manual. Nesta revisão, o código do modo opcional está preparado, mas nenhum conector do Cue foi ativado; o subprocesso precisa ser configurado no computador que tem o checkout. A interface da aplicação continua apenas informando que a conexão está pendente e não consulta o MCP, não exibe tokens nem ativa conectores. Grok continua dependente de endpoint público HTTPS e configuração do servidor.

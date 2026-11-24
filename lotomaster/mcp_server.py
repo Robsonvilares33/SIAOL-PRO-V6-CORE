@@ -128,9 +128,11 @@ ou do README funcional na branch feature/lotomaster-public-parity, com SHA-256 e
 avaliações, mapeamentos e estudos congelados ficam fora do escopo. Também há
 revisão do diff e verificações fixas. A edição substitui atomicamente o arquivo
 permitido por um temporário transitório no mesmo diretório; não cria arquivos
-finais do projeto nem apaga arquivos. A checagem SHA-256 é otimista e best-effort;
-ela não bloqueia escritores externos e pode haver corrida com outro processo.
-Não faz commit, push, merge ou deploy.
+finais do projeto nem apaga arquivos. A checagem SHA-256 é otimista e best-effort.
+Exija exclusividade do checkout durante a edição: um lock local não impede Git externo
+ou outro processo de trocar a branch/arquivo entre a validação e a escrita. O campo
+branch informa a branch capturada no início da chamada, não garante a branch no instante
+em que o arquivo é escrito. Não faz commit, push, merge ou deploy.
 HTTP permanece somente leitura.
 Não há ferramentas para editar estudos congelados, alterar jogos salvos, operar
 contas, apostar, acessar credenciais ou enviar dados a terceiros. Jogos
@@ -329,7 +331,8 @@ def _redact_private_key_blocks(text: str) -> str:
     cursor = 0
     for start, block_end in _private_key_block_spans(text):
         output.append(text[cursor:start])
-        output.append(replacement)
+        trailing_separator = block_end < len(text) and text[block_end] == "\n"
+        output.append(replacement + "\n" * (text[start:block_end].count("\n") + (0 if trailing_separator else 1)))
         cursor = block_end
     output.append(text[cursor:])
     return "".join(output)
@@ -1093,7 +1096,7 @@ def _edit_branch_file(arguments: dict[str, Any], transport: str) -> dict[str, An
         return {
             "path": arguments["path"], "branch": branch, "changed": True,
             "previous_sha256": current_hash, "sha256": hashlib.sha256(new_bytes).hexdigest(),
-            "concurrency_check": "best-effort; escritores externos não são bloqueados",
+            "concurrency_check": "best-effort; exige checkout exclusivo durante edição; branch é a capturada no início da chamada e não garante a branch no instante da escrita",
             "review_required": True, "next_tool": "review_branch_diff",
             "committed": False, "published": False,
         }
@@ -1789,11 +1792,12 @@ def _review_branch_diff(transport: str) -> dict[str, Any]:
                     )
                 ):
                     staged_paths.append(path)
+                worktree_status = status_before[path][1]
                 if (
                     path not in worktree_excluded and path not in unstaged_unstable
                     and (
                         path in intent_to_add_paths
-                        or _index_worktree_differs(index_source, worktree_source)
+                        or (worktree_status != " " and _index_worktree_differs(index_source, worktree_source))
                     )
                 ):
                     unstaged_paths.append(path)
@@ -2284,7 +2288,7 @@ def _dispatch(message: Any, *, transport: str = "unknown") -> dict[str, Any] | N
 
 def _bearer_token() -> str:
     token = os.environ.get("LOTOMASTER_MCP_BEARER_TOKEN", "")
-    if len(token) < 32 or token.strip() != token or any(character.isspace() for character in token):
+    if len(token) < 32 or re.fullmatch(r"[A-Za-z0-9._~+/-]+={0,2}", token, flags=re.ASCII) is None:
         raise RuntimeError("LOTOMASTER_MCP_BEARER_TOKEN ausente ou fraco; use um token aleatório com pelo menos 32 caracteres.")
     return token
 
@@ -2351,6 +2355,19 @@ class MCPHandler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _valid_protocol_version(self) -> bool:
+        versions = self.headers.get_all("MCP-Protocol-Version")
+        if versions is None:
+            return True
+        if len(versions) != 1:
+            self._http_error(400, "Versão MCP inválida ou não suportada.")
+            return False
+        version = versions[0].strip(" \t")
+        if not version.isascii() or version not in SUPPORTED_PROTOCOL_VERSIONS:
+            self._http_error(400, "Versão MCP inválida ou não suportada.")
+            return False
+        return True
+
     def _authorized(self) -> bool:
         try:
             expected = "Bearer " + _bearer_token()
@@ -2358,7 +2375,7 @@ class MCPHandler(BaseHTTPRequestHandler):
             self._http_error(503, "Servidor MCP indisponível: autenticação não configurada.")
             return False
         supplied = self.headers.get("Authorization", "")
-        if not hmac.compare_digest(supplied, expected):
+        if not supplied.isascii() or not hmac.compare_digest(supplied, expected):
             self._http_error(401, "Autenticação Bearer obrigatória.", challenge=True)
             return False
         return True
@@ -2368,6 +2385,8 @@ class MCPHandler(BaseHTTPRequestHandler):
             self._http_error(404, "Rota não encontrada.")
             return
         if not self._valid_host_and_origin() or not self._authorized():
+            return
+        if not self._valid_protocol_version():
             return
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
         if content_type != "application/json":
@@ -2393,8 +2412,9 @@ class MCPHandler(BaseHTTPRequestHandler):
             if len(raw) != length:
                 self._http_error(400, "Corpo da requisição incompleto.")
                 return
-            message = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+            decoded = raw.decode("utf-8")
+            message = json.loads(decoded)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
             self._http_error(400, "JSON inválido.")
             return
         response = _dispatch(message, transport="http")
@@ -2409,6 +2429,8 @@ class MCPHandler(BaseHTTPRequestHandler):
             self._http_error(404, "Rota não encontrada.")
             return
         if not self._valid_host_and_origin() or not self._authorized():
+            return
+        if not self._valid_protocol_version():
             return
         self.send_response(405)
         self.send_header("Allow", "POST")
@@ -2476,9 +2498,10 @@ def serve_stdio(input_stream=None, output_stream=None) -> None:
         else:
             try:
                 message = json.loads(line)
-                response = _dispatch(message, transport="stdio")
-            except (json.JSONDecodeError, UnicodeDecodeError):
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
                 response = _jsonrpc_error(None, -32700, "Parse error")
+            else:
+                response = _dispatch(message, transport="stdio")
         if response is not None:
             output_stream.write(json.dumps(response, ensure_ascii=False, separators=(",", ":")) + "\n")
             output_stream.flush()

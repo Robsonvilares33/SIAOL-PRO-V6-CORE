@@ -49,7 +49,8 @@ def test_pages_same_fetch_timestamp_and_expired_offline_warning(db):
     assert first['provenance']['last_successful_lookup_at'] == second['provenance']['last_successful_lookup_at']
     assert 'warning' not in first and 'warning' not in second
     assert second['items'][-1]['contest'] == 1 and not second['missing_contests']
-    assert not third['provenance']['recently_checked'] and 'offline' in third['warning']
+    assert not third['provenance']['recently_checked'] and 'temporariamente indisponível' in third['warning']
+    assert 'offline' not in third['warning']
     assert 'last_successful_lookup_at' not in third['provenance']
 
 

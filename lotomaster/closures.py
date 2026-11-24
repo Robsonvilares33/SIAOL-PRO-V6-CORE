@@ -60,6 +60,8 @@ def exhaustive_closure(
     if has_repeat_filter and reference_draw is None:
         raise ValueError("Filtros de repetidas exigem um concurso de referência explícito")
     reference = None if reference_draw is None else _validated_numbers(reference_draw, "reference_draw", spec["minimum"], spec["maximum"])
+    if has_repeat_filter and len(reference) != spec["draw_size"]:
+        raise ValueError(f"reference_draw deve conter exatamente {spec['draw_size']} dezenas")
 
     total = comb(len(numbers) - len(fixed_numbers), pick_count - len(fixed_numbers))
     fixed_set = set(fixed_numbers)

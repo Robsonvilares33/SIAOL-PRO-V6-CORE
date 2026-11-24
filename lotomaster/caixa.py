@@ -24,6 +24,10 @@ MONTHS = {
 }
 
 
+class UpstreamDrawError(Exception):
+    """The upstream source returned a response that cannot be trusted as a draw."""
+
+
 def _integer(value, field: str) -> int:
     """Accept integers and decimal digit strings, never bools/floats/truncations."""
     if isinstance(value, bool):
@@ -230,10 +234,16 @@ def fetch_draw(game: str, contest: int | None = None) -> dict:
         url += f"/{contest}"
     response = requests.get(url, headers=HEADERS, timeout=18)
     response.raise_for_status()
-    payload = response.json()
+    try:
+        payload = response.json()
+    except ValueError:
+        raise UpstreamDrawError("A fonte retornou uma resposta inválida.") from None
     if not isinstance(payload, dict):
-        raise ValueError(f"A CAIXA não retornou um concurso válido para {spec['name']}.")
-    draw = normalize_draw(spec["key"], payload)
+        raise UpstreamDrawError("A fonte retornou um concurso inválido.")
+    try:
+        draw = normalize_draw(spec["key"], payload)
+    except (ValueError, TypeError, KeyError):
+        raise UpstreamDrawError("A fonte retornou um concurso inválido.") from None
     if contest is not None and draw["contest"] != contest:
-        raise ValueError(f"A CAIXA retornou o concurso {draw['contest']} em vez do concurso {contest}.")
+        raise UpstreamDrawError("A fonte retornou um concurso diferente do solicitado.")
     return draw

@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from lotomaster.caixa import fetch_draw, normalize_draw
+from lotomaster.caixa import UpstreamDrawError, fetch_draw, normalize_draw
 from lotomaster.catalog import LOTTERIES
 from lotomaster.engine import latest_result
 
@@ -108,10 +108,10 @@ class CaixaValidationTests(unittest.TestCase):
         response = Mock()
         response.json.return_value = valid_payload("megasena")
         with patch("lotomaster.caixa.requests.get", return_value=response):
-            with self.assertRaisesRegex(ValueError, "em vez do concurso"):
+            with self.assertRaisesRegex(UpstreamDrawError, "diferente do solicitado"):
                 fetch_draw("megasena", 124)
             response.json.return_value["listaDezenas"] = ["01"]
-            with self.assertRaises(ValueError):
+            with self.assertRaises(UpstreamDrawError):
                 fetch_draw("megasena")
 
     def test_invalid_caixa_response_cannot_be_saved_as_official_result(self):

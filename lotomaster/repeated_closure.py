@@ -3,6 +3,7 @@ from itertools import combinations
 from math import comb
 from typing import Iterable
 
+from .catalog import get_spec
 from .engine import _validate_generator_filters, diagnose_ticket_filters
 
 MAX_GAMES = 1000
@@ -36,9 +37,12 @@ def repeated_closure(
 
     chosen_filters = {} if filters is None else filters
     _validate_generator_filters({"key": "lotofacil", "minimum": 1, "maximum": 25}, chosen_filters, 15)
-    if any(chosen_filters.get(key) not in (None, "") for key in ("min_repeated", "max_repeated")) and reference_draw is None:
+    has_repeat_filter = any(chosen_filters.get(key) not in (None, "") for key in ("min_repeated", "max_repeated"))
+    if has_repeat_filter and reference_draw is None:
         raise ValueError("Filtros de repetidas exigem um concurso de referência explícito")
     reference = None if reference_draw is None else _numbers(reference_draw, "reference_draw")
+    if has_repeat_filter and reference is not None and len(reference) != get_spec("lotofacil")["draw_size"]:
+        raise ValueError("reference_draw deve conter exatamente 15 dezenas")
 
     absent = tuple(number for number in range(1, 26) if number not in set(previous))
     choose_count = 15 - len(selected)

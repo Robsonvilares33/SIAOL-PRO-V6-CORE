@@ -101,6 +101,33 @@ test('probabilidade do Dia de Sorte descreve evento conjunto também em jogos ge
   const source = fs.readFileSync(path.join(staticDir, 'app.js'), 'utf8');
   assert.equal((source.match(/probabilityEvent\(item,(?:ticket\.probability|data)\)/g) || []).length, 3);
 });
+
+test('refresh concorrente atualiza concursos sem renderizar a página aberta depois da navegação', async () => {
+  let resolveLatest;
+  const pending = new Promise(resolve => { resolveLatest = resolve; });
+  const {context, elements} = setup(() => pending);
+  elements['#sync-status'] = {textContent:''};
+  let renders = 0;
+  context.render = async () => { renders++; };
+  vm.runInContext("state.catalog=[{key:'quina'}]; state.game='quina'; state.page='results'; state.lastContests.quina=10; state.lastRefreshAt=123", context);
+  const refreshing = vm.runInContext('refreshLiveData(false)', context);
+  vm.runInContext("state.page='generator'", context);
+  resolveLatest(response({contest:11}));
+  await refreshing;
+  assert.equal(renders, 0);
+  assert.equal(vm.runInContext('state.lastContests.quina', context), 11);
+  assert.notEqual(vm.runInContext('state.lastRefreshAt', context), 123);
+});
+
+test('falha total no refresh informa falha e não atualiza horário de sucesso', async () => {
+  const {context, elements} = setup(async () => { throw new Error('offline'); });
+  elements['#sync-status'] = {textContent:''};
+  vm.runInContext("state.catalog=[{key:'quina'}]; state.page='overview'; state.lastRefreshAt=123", context);
+  await vm.runInContext('refreshLiveData(true)', context);
+  assert.equal(elements['#sync-status'].textContent, 'Falha ao atualizar resultados');
+  assert.equal(vm.runInContext('state.lastRefreshAt', context), 123);
+});
+
 test('payload para a IA informa recorte limitado e proíbe alegar completude', async () => {
   let request;
   const {context, window} = setup(async (url, options) => {

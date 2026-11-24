@@ -70,6 +70,15 @@ class RepeatedClosureUnitTests(unittest.TestCase):
         )
         self.assertIn("Repetidas", checked["items"][0]["reasons"][0])
 
+    def test_repeat_filter_rejects_empty_or_partial_reference(self):
+        for reference in ([], PREVIOUS[:-1]):
+            with self.subTest(reference=reference), self.assertRaisesRegex(ValueError, "reference_draw"):
+                repeated_closure(PREVIOUS, REPEATED, filters={"min_repeated": 1}, reference_draw=reference)
+
+    def test_partial_reference_remains_ignored_without_repeat_filter(self):
+        result = repeated_closure(PREVIOUS, REPEATED, filters={}, reference_draw=PREVIOUS[:-1], page_size=1)
+        self.assertEqual(result["returned_count"], 1)
+
 
 class RepeatedClosureApiTests(unittest.TestCase):
     def setUp(self):

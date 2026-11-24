@@ -1367,16 +1367,23 @@ async function init() {
 async function refreshLiveData(force) {
   if (!state.catalog.length || document.hidden) return;
   const page=state.page;
+  const game=state.game;
   const latest=await Promise.all(state.catalog.map(item=>api(`/${item.key}/latest`).then(draw=>({item,draw})).catch(()=>null)));
+  const successful=latest.filter(Boolean);
+  if (!successful.length) {
+    if ($('#sync-status')) $('#sync-status').textContent='Falha ao atualizar resultados';
+    return;
+  }
   state.lastRefreshAt=Date.now();
   if ($('#sync-status')) $('#sync-status').textContent=`Conferido ${new Date(state.lastRefreshAt).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}`;
   let changed=false;
-  latest.filter(Boolean).forEach(({item,draw})=>{
+  successful.forEach(({item,draw})=>{
     const current=Number(draw.contest);
     if (state.lastContests[item.key]!==undefined && state.lastContests[item.key]!==current) changed=true;
     state.lastContests[item.key]=current;
   });
-  if (force || (changed && ['overview','results','statistics'].includes(page))) await render();
-  if (changed && page==='assistant' && !force && $('#ai-progress')) $('#ai-progress').textContent='Novo concurso detectado pela atualização automática. Reexecute a análise para incluir esse resultado.';
+  const contextUnchanged=state.page===page && state.game===game;
+  if (contextUnchanged && ['overview','results','statistics'].includes(page) && (force || changed)) await render();
+  if (contextUnchanged && changed && page==='assistant' && !force && $('#ai-progress')) $('#ai-progress').textContent='Novo concurso detectado pela atualização automática. Reexecute a análise para incluir esse resultado.';
 }
 window.addEventListener('DOMContentLoaded',init);

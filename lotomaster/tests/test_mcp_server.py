@@ -39,14 +39,31 @@ class MCPHTTPTests(unittest.TestCase):
         else:
             os.environ["LOTOMASTER_MCP_BEARER_TOKEN"] = cls._old_token
 
-    def post(self, payload, *, token=TOKEN, origin=None, accept="application/json, text/event-stream"):
+    def post(self, payload, *, token=TOKEN, origin=None, accept="application/json, text/event-stream", version=None):
         connection = http.client.HTTPConnection(self.host, self.port, timeout=5)
         headers = {"Content-Type": "application/json", "Accept": accept}
         if token is not None:
             headers["Authorization"] = f"Bearer {token}"
         if origin is not None:
             headers["Origin"] = origin
+        if version is not None:
+            headers["MCP-Protocol-Version"] = version
         connection.request("POST", mcp_server.MCP_PATH, json.dumps(payload), headers)
+        response = connection.getresponse()
+        body = response.read()
+        status = response.status
+        response_headers = dict(response.getheaders())
+        connection.close()
+        return status, response_headers, body
+
+    def get(self, *, token=TOKEN, version=None, accept="text/event-stream"):
+        connection = http.client.HTTPConnection(self.host, self.port, timeout=5)
+        headers = {"Accept": accept}
+        if token is not None:
+            headers["Authorization"] = f"Bearer {token}"
+        if version is not None:
+            headers["MCP-Protocol-Version"] = version
+        connection.request("GET", mcp_server.MCP_PATH, headers=headers)
         response = connection.getresponse()
         body = response.read()
         status = response.status
@@ -67,6 +84,24 @@ class MCPHTTPTests(unittest.TestCase):
         self.assertEqual(status, 403)
         status, _, _ = self.post({"jsonrpc": "2.0", "id": 1, "method": "ping"}, accept="application/json")
         self.assertEqual(status, 406)
+
+    def test_protocol_version_header_rejects_unsupported_post_and_get(self):
+        payload = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+        status, _, body = self.post(payload, version="2099-01-01")
+        self.assertEqual(status, 400)
+        self.assertNotIn(b"2099-01-01", body)
+
+        status, _, _ = self.post(payload)
+        self.assertEqual(status, 200)
+        status, _, _ = self.post(payload, version=mcp_server.MCP_PROTOCOL_VERSION)
+        self.assertEqual(status, 200)
+
+        status, _, _ = self.get(version="2099-01-01")
+        self.assertEqual(status, 400)
+        status, _, _ = self.get()
+        self.assertEqual(status, 405)
+        status, _, _ = self.get(version=mcp_server.MCP_PROTOCOL_VERSION)
+        self.assertEqual(status, 405)
 
     def test_initialize_tools_and_notification(self):
         status, _, body = self.post({
@@ -120,6 +155,26 @@ class MCPHTTPTests(unittest.TestCase):
             status, _, body = self.post({"jsonrpc": "2.0", "id": 1, "method": "ping"}, token="short")
         self.assertEqual(status, 503)
         self.assertNotIn(b"short", body)
+
+    def test_non_ascii_bearer_values_fail_closed(self):
+        with patch.dict(os.environ, {"LOTOMASTER_MCP_BEARER_TOKEN": "é" + "a" * 40}):
+            status, _, body = self.post({"jsonrpc": "2.0", "id": 1, "method": "ping"}, token="é" + "a" * 40)
+        self.assertEqual(status, 503)
+        self.assertNotIn("é".encode(), body)
+        status, _, _ = self.post({"jsonrpc": "2.0", "id": 1, "method": "ping"}, token="é" + "a" * 40)
+        self.assertEqual(status, 401)
+
+    def test_json_integer_digit_limit_returns_controlled_http_error(self):
+        body = b'{"jsonrpc":"2.0","id":' + b"9" * 5000 + b',"method":"ping"}'
+        connection = http.client.HTTPConnection(self.host, self.port, timeout=5)
+        connection.request("POST", mcp_server.MCP_PATH, body, {
+            "Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+            "Authorization": f"Bearer {TOKEN}",
+        })
+        response = connection.getresponse()
+        self.assertEqual(response.status, 400)
+        self.assertIn("JSON inv\\u00e1lido", response.read().decode())
+        connection.close()
 
 
 class MCPReadOnlyTests(unittest.TestCase):
@@ -284,10 +339,26 @@ class MCPReadOnlyTests(unittest.TestCase):
     def test_redaction_handles_repeated_private_key_markers_without_backtracking(self):
         complete = "-----BEGIN RSA PRIVATE KEY-----\nsecret material\n-----END RSA PRIVATE KEY-----"
         redacted = mcp_server._redact_sensitive_text(complete)
-        self.assertEqual(redacted, "[REDACTED PRIVATE KEY BLOCK]")
+        self.assertEqual(len(redacted.splitlines()), len(complete.splitlines()))
+        self.assertIn("[REDACTED PRIVATE KEY BLOCK]", redacted)
+        self.assertNotIn("secret material", redacted)
 
         incomplete = "-----BEGIN PRIVATE KEY-----\n" * 5000
         self.assertEqual(mcp_server._redact_sensitive_text(incomplete), incomplete)
+
+    def test_private_key_redaction_preserves_pagination_line_numbers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            secret = "UNIQUE_PRIVATE_KEY_SECRET_MATERIAL"
+            source = "before\n-----BEGIN PRIVATE KEY-----\n" + secret + "\n-----END PRIVATE KEY-----\nafter\nlast\n"
+            (root / "keys.py").write_text(source, encoding="utf-8")
+            with patch.object(mcp_server, "REPO_ROOT", root):
+                first = mcp_server._tool_result("read_project_file", {"path": "keys.py", "start_line": 1, "max_lines": 3})
+                second = mcp_server._tool_result("read_project_file", {"path": "keys.py", "start_line": 4, "max_lines": 3})
+        self.assertEqual((first["total_lines"], first["start_line"], first["end_line"]), (6, 1, 3))
+        self.assertEqual((second["total_lines"], second["start_line"], second["end_line"]), (6, 4, 6))
+        self.assertNotIn(secret, first["content"] + second["content"])
+        self.assertIn("4: ", second["content"])
 
     def test_analyze_games_is_bounded_and_non_persistent(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -322,6 +393,15 @@ class MCPReadOnlyTests(unittest.TestCase):
         self.assertEqual(responses[0]["result"]["serverInfo"]["name"], "lotomaster-mcp")
         self.assertEqual(len(responses[1]["result"]["tools"]), 9)
 
+    def test_stdio_json_integer_digit_limit_does_not_stop_next_line(self):
+        payload = '{"jsonrpc":"2.0","id":' + "9" * 5000 + ',"method":"ping"}\n'
+        payload += '{"jsonrpc":"2.0","id":2,"method":"ping"}\n'
+        output = io.StringIO()
+        mcp_server.serve_stdio(io.StringIO(payload), output)
+        responses = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(responses[0]["error"]["code"], -32700)
+        self.assertEqual(responses[1], {"jsonrpc": "2.0", "id": 2, "result": {}})
+
     def test_stdio_subprocess_starts_without_http_token(self):
         environment = os.environ.copy()
         environment.pop("LOTOMASTER_MCP_BEARER_TOKEN", None)
@@ -345,9 +425,14 @@ class MCPReadOnlyTests(unittest.TestCase):
 
 class MCPBranchEditTests(unittest.TestCase):
     def _git(self, root, *arguments):
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        environment.update({
+            "HOME": "/nonexistent", "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0",
+        })
         return subprocess.run(
             ["git", "-C", str(root), *arguments], check=True,
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, env=environment,
         )
 
     def _bounded_fifo_child(self, root, script):
@@ -372,6 +457,8 @@ class MCPBranchEditTests(unittest.TestCase):
         self._git(root, "branch", "-M", branch)
         self._git(root, "config", "user.name", "MCP Test")
         self._git(root, "config", "user.email", "mcp-test@example.invalid")
+        self._git(root, "config", "commit.gpgsign", "false")
+        self._git(root, "config", "tag.gpgsign", "false")
         self._git(root, "add", "lotomaster/script.py")
         self._git(root, "commit", "-q", "-m", "base")
         return temporary, root, target
@@ -441,6 +528,8 @@ class MCPBranchEditTests(unittest.TestCase):
         self.assertEqual(result["previous_sha256"], original_hash)
         self.assertEqual(result["sha256"], hashlib.sha256(new_content.encode("utf-8")).hexdigest())
         self.assertIn("best-effort", result["concurrency_check"])
+        self.assertIn("checkout exclusivo", result["concurrency_check"])
+        self.assertIn("capturada no início", result["concurrency_check"])
         self.assertEqual(target.read_text(encoding="utf-8"), new_content)
         self.assertEqual(list((root / "lotomaster").glob(".lotomaster-mcp-edit-*.tmp")), [])
         self.assertEqual(review["changed_files"], ["lotomaster/script.py"])
@@ -1336,6 +1425,19 @@ class MCPBranchEditTests(unittest.TestCase):
         self.assertTrue(review["diff_complete"])
         self.assertNotIn("lotomaster/script.py", review["attribute_excluded_candidates"])
         self.assertIn("staged-only ident change", review["diff"])
+        self.assertNotIn("Unstaged changes:\n", review["diff"])
+
+    def test_git_fixture_ignores_git_environment_overrides(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(os.environ, {
+                "GIT_DIR": "/definitely/not/a/git/repository", "GIT_WORK_TREE": "/tmp",
+                "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "commit.gpgsign",
+                "GIT_CONFIG_VALUE_0": "true",
+            }):
+                self._git(root, "init", "-q")
+                probe = self._git(root, "rev-parse", "--show-toplevel")
+            self.assertEqual(Path(probe.stdout.strip()), root)
 
     def test_review_skips_clean_filter_without_running_it_and_keeps_unfiltered_diff(self):
         temporary, root, target = self._repo()

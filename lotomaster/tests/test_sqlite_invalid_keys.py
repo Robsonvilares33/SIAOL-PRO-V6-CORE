@@ -120,7 +120,9 @@ def test_budget_exhaustion_is_explicit_and_online_fetch_still_works(db, monkeypa
         storage.list_draws('megasena', 2)
     with patch('lotomaster.engine.fetch_draw', side_effect=OSError('offline')):
         r = client.get('/api/v1/megasena/results?limit=1')
-    assert r.status_code == 502 and 'Limite de leitura' in r.json()['detail']
+    assert r.status_code == 502
+    assert r.json()['detail'] == 'Não foi possível consultar os resultados.'
+    assert 'Limite de leitura' not in r.json()['detail']
     engine._latest_cache.clear()
     with patch('lotomaster.engine.fetch_draw', return_value=draw(1)):
         r = client.get('/api/v1/megasena/results?limit=1')

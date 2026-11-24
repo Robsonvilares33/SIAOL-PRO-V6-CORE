@@ -66,6 +66,11 @@ class ExhaustiveClosureTests(unittest.TestCase):
         )
         self.assertIn("Repetidas", result["items"][0]["reasons"][0])
 
+    def test_repeated_filter_rejects_empty_or_partial_reference(self):
+        for reference in ([], [1, 2, 3, 4, 5]):
+            with self.subTest(reference=reference), self.assertRaisesRegex(ValueError, "reference_draw"):
+                exhaustive_closure("megasena", range(1, 8), 6, filters={"min_repeated": 1}, reference_draw=reference)
+
     def test_out_of_range_offset_returns_empty_terminal_page(self):
         result = exhaustive_closure("megasena", range(1, 8), 6, offset=999, page_size=10)
         self.assertEqual(result["items"], [])

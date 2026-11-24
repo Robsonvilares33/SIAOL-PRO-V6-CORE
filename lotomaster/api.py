@@ -1,5 +1,6 @@
 """API e aplicação web Lotomaster. Execute com: uvicorn lotomaster.api:app --port 8020."""
 import csv
+import logging
 from io import StringIO
 from pathlib import Path
 from typing import Annotated, Literal
@@ -15,7 +16,7 @@ from . import storage
 from .assistant_access import authorize_server_gemini_request
 from .analytics import analyze_draws, pareto_filter_data
 from .assistant import build_assistant_report
-from .caixa import BASE_URL, fetch_draw
+from .caixa import BASE_URL, UpstreamDrawError, fetch_draw
 from .catalog import get_spec, public_catalog, public_spec
 from .validation import MAX_DRAWS, validate_draw, validate_draws
 from .request_limits import DrawBodyLimit
@@ -37,6 +38,7 @@ app = FastAPI(
     redoc_url=None,
     debug=False,
 )
+logger = logging.getLogger(__name__)
 app.add_middleware(DrawBodyLimit)
 
 
@@ -47,10 +49,16 @@ class GenerateRequest(BaseModel):
     excluded: list[StrictInt] = Field(default_factory=list, max_length=100)
     bonus: dict = Field(default_factory=dict)
     filters: dict = Field(default_factory=dict)
-    columns: dict = Field(default_factory=dict)
+    columns: dict[str, "SuperSeteColumn"] = Field(default_factory=dict)
     weights: dict | None = None
     pareto: bool = False
     seed: StrictInt | None = None
+
+
+class SuperSeteColumn(BaseModel):
+    fixed: list[StrictInt] = Field(default_factory=list)
+    excluded: list[StrictInt] = Field(default_factory=list)
+    pick_count: StrictInt = 1
 
 
 class ClosureRequest(BaseModel):
@@ -81,7 +89,7 @@ class Ticket(BaseModel):
 
 class SimulateRequest(BaseModel):
     tickets: list[Ticket] = Field(default_factory=list, max_length=500)
-    contest: StrictInt | None = None
+    contest: StrictInt | None = Field(default=None, ge=1)
     draw: dict | None = None
 
 
@@ -213,8 +221,8 @@ def game_statistics_from_draws(game: str, request: AnalyzeDrawsRequest):
         raise HTTPException(status_code=404, detail="Modalidade não encontrada.")
     except HTTPException:
         raise
-    except Exception as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception:
+        raise HTTPException(status_code=422, detail="Não foi possível analisar os concursos enviados.") from None
 
 
 @app.get("/api/v1/{game}/statistics")
@@ -244,8 +252,8 @@ def game_statistics(
         raise HTTPException(status_code=404, detail="Modalidade não encontrada.")
     except HTTPException:
         raise
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+    except Exception:
+        raise HTTPException(status_code=502, detail="Não foi possível calcular as estatísticas.") from None
 
 
 @app.get("/api/v1/{game}/assistant")
@@ -294,8 +302,10 @@ def game_assistant_from_draws(game: str, http_request: Request, request: Assista
         raise HTTPException(status_code=404, detail="Modalidade não encontrada.")
     except HTTPException:
         raise
-    except Exception as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Dados de concursos inválidos.") from None
+    except Exception:
+        raise HTTPException(status_code=502, detail="Não foi possível gerar o relatório do assistente.") from None
 
 
 @app.post("/api/v1/{game}/generate")
@@ -318,8 +328,8 @@ def game_generate(game: str, request: GenerateRequest):
         raise HTTPException(status_code=404, detail="Modalidade não encontrada.")
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Não foi possível gerar os jogos.") from None
 
 
 @app.post("/api/v1/{game}/closures/exhaustive")
@@ -345,10 +355,12 @@ def game_exhaustive_closure(game: str, request: ClosureRequest):
         return result
     except KeyError:
         raise HTTPException(status_code=404, detail="Modalidade não encontrada.")
+    except UpstreamDrawError:
+        raise HTTPException(status_code=502, detail="Não foi possível validar o resultado consultado na fonte.") from None
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Não foi possível consultar o concurso de referência: {exc}")
+    except Exception:
+        raise HTTPException(status_code=502, detail="Não foi possível consultar o concurso de referência.") from None
 
 
 @app.post("/api/v1/lotofacil/closures/repeated")
@@ -371,10 +383,12 @@ def lotofacil_repeated_closure(request: RepeatedClosureRequest):
         if reference:
             result["reference_contest"] = reference["contest"]
         return result
+    except UpstreamDrawError:
+        raise HTTPException(status_code=502, detail="Não foi possível validar o resultado consultado na fonte.") from None
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Não foi possível consultar o concurso de referência: {exc}")
+    except Exception:
+        raise HTTPException(status_code=502, detail="Não foi possível consultar o concurso de referência.") from None
 
 
 def _reference_draw(game: str, contest: int) -> dict:
@@ -401,7 +415,10 @@ def game_simulate(game: str, request: SimulateRequest):
             else:
                 draw = fetch_draw(spec["key"], request.contest)
                 validate_draw(spec["key"], draw, require_game=True, require_special=True)
-                storage.save_draw(draw)
+                try:
+                    storage.save_draw(draw)
+                except Exception:
+                    logger.error("Não foi possível persistir o concurso consultado para %s", spec["key"])
                 provenance = {"kind": "server_fetch", "verified": False, "description": "Resultado consultado pelo servidor via Worker; confirme na CAIXA."}
         else:
             draw = latest_result(spec["key"])
@@ -420,10 +437,12 @@ def game_simulate(game: str, request: SimulateRequest):
         raise HTTPException(status_code=404, detail="Modalidade não encontrada.")
     except HTTPException:
         raise
+    except UpstreamDrawError:
+        raise HTTPException(status_code=502, detail="Não foi possível validar o resultado consultado na fonte.") from None
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+    except Exception:
+        raise HTTPException(status_code=502, detail="Não foi possível conferir os jogos.") from None
 
 
 @app.post("/api/v1/{game}/simulate/history")
@@ -440,8 +459,8 @@ def game_simulate_history(game: str, request: HistorySimulateRequest):
         raise HTTPException(status_code=404, detail="Modalidade não encontrada.")
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Não foi possível conferir o histórico enviado.") from None
 
 
 @app.get("/api/v1/{game}/probability")
@@ -459,8 +478,10 @@ def game_probability(
         return {"game": spec["key"], "game_name": spec["name"], **result, "disclaimer": "Cálculo combinatório teórico; cada sorteio é aleatório e independente."}
     except KeyError:
         raise HTTPException(status_code=404, detail="Modalidade não encontrada.")
-    except Exception as exc:
+    except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Não foi possível calcular a probabilidade.") from None
 
 
 @app.get("/api/v1/{game}/export.csv")
@@ -470,8 +491,8 @@ def game_export(game: str, limit: int = Query(default=100, ge=1, le=300)):
         draws = list_results(spec["key"], limit=limit)
     except KeyError:
         raise HTTPException(status_code=404, detail="Modalidade não encontrada.")
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+    except Exception:
+        raise HTTPException(status_code=502, detail="Não foi possível exportar os resultados.") from None
     stream = StringIO()
     writer = csv.writer(stream)
     writer.writerow(["Concurso", "Data", "Dezenas", "Segundo sorteio", "Trevos", "Mês da Sorte", "Time do Coração"])
@@ -492,8 +513,8 @@ def game_export_txt(game: str, limit: int = Query(default=100, ge=1, le=300)):
         draws = list_results(spec["key"], limit=limit)
     except KeyError:
         raise HTTPException(status_code=404, detail="Modalidade não encontrada.")
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+    except Exception:
+        raise HTTPException(status_code=502, detail="Não foi possível exportar os resultados.") from None
     lines = [f"Resultados de {spec['name']} — fonte pública CAIXA", ""]
     for draw in draws:
         lines.append(f"Concurso {draw.get('contest')} · {draw.get('draw_date') or 'data indisponível'}")
@@ -575,8 +596,8 @@ def game_export_xlsx(game: str, limit: int = Query(default=100, ge=1, le=300)):
         draws = list_results(spec["key"], limit=limit)
     except KeyError:
         raise HTTPException(status_code=404, detail="Modalidade não encontrada.")
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+    except Exception:
+        raise HTTPException(status_code=502, detail="Não foi possível exportar os resultados.") from None
     filename = f"lotomaster-{spec['key']}-resultados.xlsx"
     return Response(
         _xlsx_results(draws),

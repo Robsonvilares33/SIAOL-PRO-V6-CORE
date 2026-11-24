@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 from fastapi.testclient import TestClient
 
 from lotomaster.api import app
-from lotomaster.caixa import BASE_URL, fetch_draw, normalize_draw
+from lotomaster.caixa import BASE_URL, UpstreamDrawError, fetch_draw, normalize_draw
 
 
 class LotomasterApiTests(unittest.TestCase):
@@ -77,6 +77,49 @@ class LotomasterApiTests(unittest.TestCase):
             self.assertEqual(response.json()["results"][0]["main_hits"], 4)
             invalid = self.client.post("/api/v1/megasena/simulate", json={"tickets": [{"numbers": [1, 2, 3, 4, 5]}]})
             self.assertEqual(invalid.status_code, 422)
+
+    def test_generate_rejects_malformed_supersete_columns_and_fractional_pick_count(self):
+        malformed = self.client.post("/api/v1/supersete/generate", json={"columns": {"1": "not-an-object"}})
+        fractional = self.client.post("/api/v1/supersete/generate", json={"columns": {"1": {"pick_count": 1.5}}})
+        fractional_month = self.client.post("/api/v1/diadesorte/generate", json={"bonus": {"month": 2.5}})
+        self.assertEqual(malformed.status_code, 422)
+        self.assertEqual(fractional.status_code, 422)
+        self.assertEqual(fractional_month.status_code, 422)
+
+    def test_simulate_contest_keeps_valid_draw_when_storage_save_fails(self):
+        draw = {"game": "megasena", "contest": 42, "draw_date": "01/01/2026", "numbers": [1, 2, 3, 4, 5, 6]}
+        with patch("lotomaster.api.storage.get_draw", return_value=None), \
+             patch("lotomaster.api.fetch_draw", return_value=draw), \
+             patch("lotomaster.api.storage.save_draw", side_effect=OSError("disk")):
+            response = self.client.post("/api/v1/megasena/simulate", json={"contest": 42, "tickets": [{"numbers": [1, 2, 3, 4, 7, 8]}]})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["contest"], 42)
+        self.assertEqual(response.json()["results"][0]["main_hits"], 4)
+
+    def test_upstream_draw_errors_are_502_and_do_not_expose_source_details(self):
+        sentinel = "/srv/private/provider-payload"
+        expected = "Não foi possível validar o resultado consultado na fonte."
+        with patch("lotomaster.api.storage.get_draw", return_value=None), \
+             patch("lotomaster.api.fetch_draw", side_effect=UpstreamDrawError(sentinel)):
+            simulation = self.client.post("/api/v1/megasena/simulate", json={"contest": 123, "tickets": [{"numbers": [1, 2, 3, 4, 5, 6]}]})
+        self.assertEqual(simulation.status_code, 502)
+        self.assertEqual(simulation.json()["detail"], expected)
+        self.assertNotIn(sentinel, simulation.text)
+
+        closure_payload = {
+            "pool": [1, 2, 3, 4, 5, 6], "pick_count": 6, "reference_contest": 123,
+            "filters": {"min_repeated": 1},
+        }
+        with patch("lotomaster.api.storage.get_draw", return_value=None), \
+             patch("lotomaster.api.fetch_draw", side_effect=UpstreamDrawError(sentinel)):
+            closure = self.client.post("/api/v1/megasena/closures/exhaustive", json=closure_payload)
+        self.assertEqual(closure.status_code, 502)
+        self.assertEqual(closure.json()["detail"], expected)
+        self.assertNotIn(sentinel, closure.text)
+
+    def test_simulate_rejects_nonpositive_contest(self):
+        response = self.client.post("/api/v1/megasena/simulate", json={"contest": 0, "tickets": [{"numbers": [1, 2, 3, 4, 5, 6]}]})
+        self.assertEqual(response.status_code, 422)
 
     def test_exhaustive_closure_api_pages_and_reports_filter_reasons(self):
         payload = {

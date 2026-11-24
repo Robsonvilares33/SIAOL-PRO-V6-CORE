@@ -33,6 +33,27 @@ class LatestResultCacheTests(unittest.TestCase):
         self.assertEqual(result["contest"], 101)
         self.assertEqual(result["source"], "CAIXA via Cloudflare Worker")
 
+    def test_valid_fetch_survives_storage_failure_and_replaces_stale_memory(self):
+        fresh = {"contest": 101, "numbers": [4, 5, 6]}
+        engine._latest_cache["megasena"] = (time.monotonic(), {"contest": 100, "numbers": [1, 2, 3]})
+        with patch("lotomaster.engine.fetch_draw", return_value=fresh), \
+             patch("lotomaster.engine.storage.save_draw", side_effect=OSError("disk")), \
+             patch("lotomaster.engine.storage.latest_draw", side_effect=AssertionError("must not fall back")):
+            result = engine.latest_result("megasena", refresh=True)
+        self.assertEqual(result["contest"], 101)
+        self.assertEqual(result["source"], "CAIXA via Cloudflare Worker")
+        self.assertEqual(engine._latest_cache["megasena"][1]["contest"], 101)
+
+    def test_sequential_older_refresh_does_not_downgrade_cache(self):
+        newer = {"contest": 101, "numbers": [4, 5, 6]}
+        older = {"contest": 100, "numbers": [1, 2, 3]}
+        with patch("lotomaster.engine.fetch_draw", side_effect=[newer, older]), patch("lotomaster.engine.storage.save_draw"):
+            first = engine.latest_result("megasena", refresh=True)
+            second = engine.latest_result("megasena", refresh=True)
+        self.assertEqual(first["contest"], 101)
+        self.assertEqual(second["contest"], 101)
+        self.assertEqual(engine._latest_cache["megasena"][1]["contest"], 101)
+
     def test_refresh_false_returns_recent_memory_cache_without_fetching(self):
         cached = {"contest": 100, "numbers": [1, 2, 3]}
         engine._latest_cache["megasena"] = (time.monotonic(), cached)

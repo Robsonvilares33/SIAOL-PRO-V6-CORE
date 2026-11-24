@@ -1,5 +1,6 @@
 """Serviços de negócio da Lotomaster: histórico oficial, geração e conferência de jogos."""
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging
 from math import comb, isfinite, prod
 from datetime import datetime, timezone
 import random
@@ -14,6 +15,7 @@ from .client_draws import validate_client_draws
 from . import storage
 
 _LATEST_TTL_SECONDS = 90
+logger = logging.getLogger(__name__)
 _latest_cache: dict[str, tuple[float, dict]] = {}
 _latest_lock = threading.Lock()
 
@@ -28,16 +30,18 @@ def latest_result(game: str, refresh: bool = True) -> dict:
         return {**cached_mem[1], "source": "cache"}
     try:
         draw = fetch_draw(key)
-        storage.save_draw(draw)
+        try:
+            storage.save_draw(draw)
+        except Exception:
+            logger.error("Não foi possível persistir o resultado consultado para %s", key)
         checked_at = datetime.now(timezone.utc).isoformat()
         draw = {**draw, "_latest_checked_at": checked_at}
         with _latest_lock:
             concurrent_mem = _latest_cache.get(key)
             if (
                 concurrent_mem is not None
-                and concurrent_mem is not cached_mem
                 and concurrent_mem[1].get("_latest_checked_at")
-                and int(concurrent_mem[1]["contest"]) >= int(draw["contest"])
+                and int(concurrent_mem[1]["contest"]) > int(draw["contest"])
             ):
                 return {**concurrent_mem[1], "source": "CAIXA via Cloudflare Worker"}
             _latest_cache[key] = (now, draw)
@@ -279,6 +283,11 @@ def generate_tickets(game: str, options: dict | None = None) -> list[dict]:
                 month = rng.randint(bonus["minimum"], bonus["maximum"])
             else:
                 try:
+                    if isinstance(month, bool) or not (
+                        isinstance(month, int)
+                        or isinstance(month, str) and month.strip().isascii() and month.strip().isdigit()
+                    ):
+                        raise ValueError
                     month = int(month)
                 except (TypeError, ValueError):
                     raise ValueError(f"O Mês da Sorte deve estar entre {bonus['minimum']} e {bonus['maximum']}.") from None
