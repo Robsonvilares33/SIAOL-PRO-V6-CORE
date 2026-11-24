@@ -493,6 +493,41 @@ class MCPBranchEditTests(unittest.TestCase):
         self.assertNotIn("live index version", diff)
         self.assertNotIn("live worktree version", diff)
 
+    def test_intent_to_add_is_not_reported_as_staged_and_is_rendered_from_snapshot(self):
+        temporary, root, target = self._repo()
+        self.addCleanup(temporary.cleanup)
+        target.write_text("intent-to-add contents\n", encoding="utf-8")
+        self._git(root, "add", "-N", "lotomaster/script.py")
+        with patch.object(mcp_server, "REPO_ROOT", root), patch.dict(
+            os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"},
+        ):
+            review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
+        self.assertEqual(review["staged_files"], [])
+        self.assertTrue(review["diff_complete"])
+        self.assertIn("Unstaged changes:", review["diff"])
+        self.assertNotIn("Staged changes:", review["diff"])
+        self.assertIn("intent-to-add contents", review["diff"])
+
+    def test_empty_intent_to_add_is_distinct_from_a_staged_empty_file(self):
+        temporary, root, target = self._repo()
+        self.addCleanup(temporary.cleanup)
+        intent = root / "lotomaster" / "empty_intent.py"
+        staged = root / "lotomaster" / "empty_staged.py"
+        intent.touch()
+        staged.touch()
+        self._git(root, "add", "-N", "lotomaster/empty_intent.py")
+        self._git(root, "add", "lotomaster/empty_staged.py")
+        with patch.object(mcp_server, "REPO_ROOT", root), patch.dict(
+            os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"},
+        ):
+            review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
+        self.assertEqual(review["staged_files"], ["lotomaster/empty_staged.py"])
+        self.assertTrue(review["diff_complete"])
+        staged_diff, unstaged_diff = review["diff"].split("Unstaged changes:", 1)
+        self.assertIn("empty_staged.py", staged_diff)
+        self.assertNotIn("empty_intent.py", staged_diff)
+        self.assertIn("empty_intent.py", unstaged_diff)
+
     @unittest.skipUnless(os.name == "posix", "symlink de arquivo requer suporte POSIX")
     def test_staged_diff_survives_unsafe_symlink_worktree_copy(self):
         temporary, root, target = self._repo()
@@ -512,6 +547,37 @@ class MCPBranchEditTests(unittest.TestCase):
         self.assertFalse(review["diff_complete"])
         self.assertIn("captured staged version", review["diff"])
         self.assertNotIn("must not enter", review["diff"])
+
+    @unittest.skipUnless(os.name == "posix", "symlink de diretório requer suporte POSIX")
+    def test_fallback_rejects_symlinked_parent_and_keeps_staged_diff(self):
+        temporary, root, target = self._repo()
+        self.addCleanup(temporary.cleanup)
+        target.write_text("captured staged version\n", encoding="utf-8")
+        self._git(root, "add", "lotomaster/script.py")
+        outside = root.parent / f"{root.name}-outside"
+        outside.mkdir()
+        outside_target = outside / "script.py"
+        outside_target.write_text("outside checkout contents\n", encoding="utf-8")
+        self.addCleanup(lambda: outside.rmdir() if outside.exists() else None)
+        self.addCleanup(lambda: outside_target.unlink() if outside_target.exists() else None)
+        target.unlink()
+        target.parent.rmdir()
+        target.parent.symlink_to(outside, target_is_directory=True)
+
+        def fallback_snapshot(path):
+            return mcp_server._safe_worktree_snapshot_fallback(root.joinpath(*path.split("/")))
+
+        with (
+            patch.object(mcp_server, "REPO_ROOT", root),
+            patch.object(mcp_server, "_safe_worktree_snapshot", side_effect=fallback_snapshot),
+            patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"}),
+        ):
+            review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
+        self.assertEqual(review["staged_files"], ["lotomaster/script.py"])
+        self.assertEqual(review["worktree_excluded_files"], ["lotomaster/script.py"])
+        self.assertFalse(review["diff_complete"])
+        self.assertIn("captured staged version", review["diff"])
+        self.assertNotIn("outside checkout contents", review["diff"])
 
     def test_review_candidate_inventory_is_independent_of_capped_project_listing(self):
         temporary, root, _ = self._repo()
@@ -549,7 +615,7 @@ class MCPBranchEditTests(unittest.TestCase):
         self.assertFalse(review["diff_complete"])
         self.assertEqual(review["candidate_inventory_excluded"], 1)
 
-    def test_changed_paths_come_from_one_comparison_against_head(self):
+    def test_changed_paths_are_rechecked_after_snapshot_capture(self):
         temporary, root, target = self._repo()
         self.addCleanup(temporary.cleanup)
         target.write_text("staged version\n", encoding="utf-8")
@@ -569,12 +635,46 @@ class MCPBranchEditTests(unittest.TestCase):
             patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"}),
         ):
             review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
-        self.assertEqual(len(path_queries), 1)
+        self.assertEqual(len(path_queries), 2)
         self.assertIn("--no-renames", path_queries[0])
         self.assertEqual(path_queries[0][0], "status")
         self.assertEqual(review["changed_files"], ["lotomaster/script.py"])
         self.assertIn("staged version", review["diff"])
         self.assertIn("working-tree version", review["diff"])
+
+    def test_review_marks_a_newly_changed_path_unrendered_after_capture(self):
+        temporary, root, target = self._repo()
+        self.addCleanup(temporary.cleanup)
+        stable = root / "lotomaster" / "stable.py"
+        stable.write_text("stable base\n", encoding="utf-8")
+        self._git(root, "add", "lotomaster/stable.py")
+        self._git(root, "commit", "-q", "-m", "add stable review file")
+        target.write_text("initial dirty version\n", encoding="utf-8")
+        original_git_output = mcp_server._git_output
+        status_queries = 0
+
+        def change_after_initial_status(arguments, *, timeout=10):
+            nonlocal status_queries
+            output = original_git_output(arguments, timeout=timeout)
+            if arguments and arguments[0] == "status" and "--porcelain=v1" in arguments:
+                status_queries += 1
+                if status_queries == 1:
+                    stable.write_text("late change not captured\n", encoding="utf-8")
+            return output
+
+        with (
+            patch.object(mcp_server, "REPO_ROOT", root),
+            patch.object(mcp_server, "_git_output", side_effect=change_after_initial_status),
+            patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"}),
+        ):
+            review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
+        self.assertEqual(status_queries, 2)
+        self.assertEqual(review["changed_files"], ["lotomaster/script.py", "lotomaster/stable.py"])
+        self.assertEqual(review["unrendered_files"], ["lotomaster/stable.py"])
+        self.assertFalse(review["diff_complete"])
+        self.assertFalse(review["diff_withheld"])
+        self.assertIn("initial dirty version", review["diff"])
+        self.assertNotIn("late change not captured", review["diff"])
 
     def test_review_disables_rename_detection_and_keeps_both_safe_paths(self):
         temporary, root, _ = self._repo()
@@ -943,9 +1043,10 @@ class MCPBranchEditTests(unittest.TestCase):
 
     def test_fallback_snapshot_reads_at_most_limit_plus_one(self):
         with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory) / "file.py"
+            root = Path(directory)
+            target = root / "file.py"
             target.write_bytes(b"12345678")
-            with patch.object(mcp_server, "MAX_PROJECT_FILE_BYTES", 8):
+            with patch.object(mcp_server, "REPO_ROOT", root), patch.object(mcp_server, "MAX_PROJECT_FILE_BYTES", 8):
                 _, snapshot = mcp_server._safe_worktree_snapshot_fallback(target)
             self.assertEqual(snapshot, b"12345678")
 
@@ -965,6 +1066,7 @@ class MCPBranchEditTests(unittest.TestCase):
                 return original_read(file_fd, limit)
 
             with (
+                patch.object(mcp_server, "REPO_ROOT", root),
                 patch.object(mcp_server, "MAX_PROJECT_FILE_BYTES", 8),
                 patch.object(mcp_server.os, "read", side_effect=track_os_read),
                 patch.object(mcp_server, "_read_fd_limited", side_effect=grow_then_read),
@@ -976,11 +1078,13 @@ class MCPBranchEditTests(unittest.TestCase):
 
     def test_fallback_snapshot_withholds_on_initial_stat_error_but_keeps_missing_file(self):
         with tempfile.TemporaryDirectory() as directory:
-            candidate = Path(directory) / "candidate.py"
-            with patch.object(Path, "stat", side_effect=PermissionError("blocked")):
+            root = Path(directory)
+            candidate = root / "candidate.py"
+            with patch.object(mcp_server, "REPO_ROOT", root), patch.object(Path, "stat", side_effect=PermissionError("blocked")):
                 with self.assertRaisesRegex(ValueError, "Arquivo de trabalho inacessível"):
                     mcp_server._safe_worktree_snapshot_fallback(candidate)
-            self.assertIsNone(mcp_server._safe_worktree_snapshot_fallback(candidate))
+            with patch.object(mcp_server, "REPO_ROOT", root):
+                self.assertIsNone(mcp_server._safe_worktree_snapshot_fallback(candidate))
 
     def test_review_withholds_diff_for_unverified_git_worktree_encoding(self):
         temporary, root, target = self._repo()
@@ -1017,6 +1121,35 @@ class MCPBranchEditTests(unittest.TestCase):
         self.assertEqual(review["attribute_excluded_candidates"], ["lotomaster/script.py"])
         self.assertEqual(review["diff"], "")
         self.assertNotIn(changed[6], review["diff"])
+
+    def test_review_marks_text_attribute_mismatch_incomplete_without_losing_other_diffs(self):
+        temporary, root, target = self._repo()
+        self.addCleanup(temporary.cleanup)
+        safe = root / "lotomaster" / "safe.py"
+        safe.write_text("safe before\n", encoding="utf-8")
+        attributes = root / ".gitattributes"
+        attributes.write_text("lotomaster/script.py text\n", encoding="utf-8")
+        self._git(root, "add", ".gitattributes", "lotomaster/script.py", "lotomaster/safe.py")
+        self._git(root, "commit", "-q", "-m", "add text attribute fixture")
+        attributes.write_text("lotomaster/script.py -text\n", encoding="utf-8")
+        self._git(root, "add", ".gitattributes")
+        target.write_bytes(b"new line with CRLF\r\n")
+        safe.write_text("safe changed\n", encoding="utf-8")
+        actual_diff = subprocess.run(
+            ["git", "-C", str(root), "diff", "--", "lotomaster/script.py"],
+            check=True, capture_output=True, timeout=10,
+        ).stdout
+        self.assertIn(b"+new line with CRLF\r\n", actual_diff)
+
+        with patch.object(mcp_server, "REPO_ROOT", root), patch.dict(
+            os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"},
+        ):
+            review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
+        self.assertFalse(review["diff_withheld"])
+        self.assertFalse(review["diff_complete"])
+        self.assertEqual(review["attribute_excluded_candidates"], ["lotomaster/script.py"])
+        self.assertIn("safe changed", review["diff"])
+        self.assertNotIn("new line with CRLF", review["diff"])
 
     def test_review_skips_clean_filter_without_running_it_and_keeps_unfiltered_diff(self):
         temporary, root, target = self._repo()
