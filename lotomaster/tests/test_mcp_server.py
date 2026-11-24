@@ -523,14 +523,15 @@ class MCPBranchEditTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         target.write_text("value = 1  \n", encoding="utf-8")
         self._git(root, "add", "lotomaster/script.py")
+        self._git(root, "config", "core.whitespace", "blank-at-eol")
         target.write_text("value = 2  \n", encoding="utf-8")
         calls = []
 
         def run_check(label, command, env, timeout):
-            calls.append(label)
+            calls.append((label, command, env, timeout))
             if label.startswith("git_diff_check_"):
                 completed = subprocess.run(
-                    command, cwd=root, capture_output=True, text=True, timeout=timeout,
+                    command, cwd=root, env=env, capture_output=True, text=True, timeout=timeout,
                 )
                 return {
                     "check": label, "passed": completed.returncode == 0,
@@ -546,10 +547,15 @@ class MCPBranchEditTests(unittest.TestCase):
         ):
             result = mcp_server._run_branch_checks("stdio")
         checks = {item["check"]: item for item in result["checks"]}
-        self.assertIn("git_diff_check_staged", calls)
-        self.assertIn("git_diff_check_unstaged", calls)
+        labels = [item[0] for item in calls]
+        self.assertIn("git_diff_check_staged", labels)
+        self.assertIn("git_diff_check_unstaged", labels)
         self.assertFalse(checks["git_diff_check_staged"]["passed"])
         self.assertFalse(checks["git_diff_check_unstaged"]["passed"])
+        for label, command, env, _ in calls:
+            if label.startswith("git_diff_check_"):
+                self.assertIn("core.whitespace=blank-at-eol", command)
+                self.assertEqual(env["HOME"], os.path.dirname(env["LOTOMASTER_DB_PATH"]))
 
     def test_diff_redacts_a_complete_private_key_before_truncation(self):
         temporary, root, target = self._repo()
@@ -581,6 +587,7 @@ class MCPBranchEditTests(unittest.TestCase):
             patch.object(mcp_server, "REPO_ROOT", root),
             patch.object(mcp_server, "MAX_BRANCH_DIFF_BYTES", 256),
             patch.object(mcp_server, "_git_output", side_effect=fake_git),
+            patch.object(mcp_server, "_capture_diff_source_versions", return_value=("a" * 40, {})),
             patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"}),
         ):
             review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
@@ -610,6 +617,48 @@ class MCPBranchEditTests(unittest.TestCase):
         self.assertIn("[REDACTED PRIVATE KEY BLOCK]", review["diff"])
         self.assertNotIn(body[6], review["diff"])
         self.assertNotIn(changed[6], review["diff"])
+        self.assertFalse(review["diff_withheld"])
+
+    def test_review_withholds_diff_when_worktree_changes_during_render(self):
+        temporary, root, target = self._repo()
+        self.addCleanup(temporary.cleanup)
+        target.write_text("rendered version\n", encoding="utf-8")
+        original_git_output = mcp_server._git_output
+        rendered = False
+
+        def mutate_after_diff(arguments, *, timeout=10):
+            nonlocal rendered
+            output = original_git_output(arguments, timeout=timeout)
+            if not rendered and arguments[:1] == ["diff"] and "--no-ext-diff" in arguments:
+                target.write_text("raced version\n", encoding="utf-8")
+                rendered = True
+            return output
+
+        with (
+            patch.object(mcp_server, "REPO_ROOT", root),
+            patch.object(mcp_server, "_git_output", side_effect=mutate_after_diff),
+            patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"}),
+        ):
+            review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
+        self.assertTrue(rendered)
+        self.assertTrue(review["diff_withheld"])
+        self.assertFalse(review["diff_complete"])
+        self.assertEqual(review["diff"], "")
+
+    def test_review_withholds_diff_when_head_changes_during_render(self):
+        temporary, root, target = self._repo()
+        self.addCleanup(temporary.cleanup)
+        target.write_text("unstaged change\n", encoding="utf-8")
+        head = self._git(root, "rev-parse", "HEAD").stdout.strip()
+        with (
+            patch.object(mcp_server, "REPO_ROOT", root),
+            patch.object(mcp_server, "_capture_diff_source_versions", side_effect=[(head, {}), ("0" * 40, {})]),
+            patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"}),
+        ):
+            review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
+        self.assertTrue(review["diff_withheld"])
+        self.assertFalse(review["diff_complete"])
+        self.assertEqual(review["diff"], "")
 
     def test_fixed_check_bounds_output_redacts_retained_text_and_keeps_timeout(self):
         secret = "-----BEGIN PRIVATE KEY-----\nSECRETKEYMATERIAL0123456789\n-----END PRIVATE KEY-----"
@@ -633,17 +682,62 @@ class MCPBranchEditTests(unittest.TestCase):
         self.assertTrue(timed_out["timed_out"])
 
     @unittest.skipUnless(os.name == "posix", "encerramento de grupo de processos requer POSIX")
-    def test_fixed_check_timeout_kills_descendants_holding_pipes(self):
+    def test_fixed_check_timeout_kills_ready_descendants_holding_pipes(self):
         with tempfile.TemporaryDirectory() as directory:
+            ready = Path(directory) / "descendant-ready.txt"
             marker = Path(directory) / "descendant-survived.txt"
-            child_script = f"import time;time.sleep(0.7);open({str(marker)!r}, 'w').write('alive')"
-            parent_script = "import subprocess,sys,time;subprocess.Popen([sys.executable,'-c',sys.argv[1]]);time.sleep(10)"
+            child_script = (
+                "import pathlib,sys,time;pathlib.Path(sys.argv[1]).write_text('ready');"
+                "time.sleep(4);pathlib.Path(sys.argv[2]).write_text('alive')"
+            )
+            parent_script = (
+                "import pathlib,subprocess,sys,time\n"
+                "subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2],sys.argv[3]])\n"
+                "deadline=time.monotonic()+2\n"
+                "while not pathlib.Path(sys.argv[2]).exists() and time.monotonic()<deadline:\n"
+                "    time.sleep(.01)\n"
+                "if not pathlib.Path(sys.argv[2]).exists():\n"
+                "    raise SystemExit(3)\n"
+                "time.sleep(10)"
+            )
             result = mcp_server._run_fixed_check(
-                "descendant-timeout", [sys.executable, "-c", parent_script, child_script],
-                os.environ.copy(), 0.1,
+                "descendant-timeout", [sys.executable, "-c", parent_script, child_script, str(ready), str(marker)],
+                os.environ.copy(), 3,
             )
             self.assertTrue(result["timed_out"])
-            threading.Event().wait(0.9)
+            self.assertTrue(ready.exists(), "the child must signal readiness before the timeout")
+            threading.Event().wait(1.2)
+            self.assertFalse(marker.exists())
+
+    @unittest.skipUnless(os.name == "posix", "encerramento de grupo de processos requer POSIX")
+    def test_fixed_check_marks_forced_cleanup_incomplete_when_leader_exits_zero(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ready = Path(directory) / "descendant-ready.txt"
+            marker = Path(directory) / "descendant-survived.txt"
+            child_script = (
+                "import pathlib,sys,time;pathlib.Path(sys.argv[1]).write_text('ready');"
+                "time.sleep(5);pathlib.Path(sys.argv[2]).write_text('alive')"
+            )
+            parent_script = (
+                "import pathlib,subprocess,sys,time\n"
+                "subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2],sys.argv[3]])\n"
+                "deadline=time.monotonic()+2\n"
+                "while not pathlib.Path(sys.argv[2]).exists() and time.monotonic()<deadline:\n"
+                "    time.sleep(.01)\n"
+                "if not pathlib.Path(sys.argv[2]).exists():\n"
+                "    raise SystemExit(3)\n"
+                "raise SystemExit(0)"
+            )
+            result = mcp_server._run_fixed_check(
+                "descendant-incomplete",
+                [sys.executable, "-c", parent_script, child_script, str(ready), str(marker)],
+                os.environ.copy(), 5,
+            )
+            self.assertTrue(ready.exists(), "the child must signal readiness before the leader exits")
+            self.assertFalse(result["passed"])
+            self.assertFalse(result.get("timed_out", False))
+            self.assertTrue(result["incomplete"])
+            threading.Event().wait(5.2)
             self.assertFalse(marker.exists())
 
     def test_fingerprint_covers_repository_wide_and_staged_content(self):
@@ -667,6 +761,11 @@ class MCPBranchEditTests(unittest.TestCase):
             untracked_second = mcp_server._working_tree_fingerprint()
             self.assertNotEqual(untracked_first, untracked_second)
             untracked.unlink()
+
+            before_head_change = mcp_server._working_tree_fingerprint()
+            self._git(root, "commit", "--allow-empty", "-q", "-m", "advance HEAD without tree changes")
+            after_head_change = mcp_server._working_tree_fingerprint()
+            self.assertNotEqual(before_head_change, after_head_change)
 
             target.write_text("first staged content\n", encoding="utf-8")
             self._git(root, "add", "lotomaster/script.py")
@@ -806,6 +905,8 @@ class MCPBranchEditTests(unittest.TestCase):
         self.assertEqual(calls[1][1][1:3], ["--check", "lotomaster/static/app.js"])
         self.assertIn("--cached", calls[-2][1])
         self.assertNotIn("--cached", calls[-1][1])
+        for _, command, _, _ in calls[-2:]:
+            self.assertIn("core.whitespace=blank-at-eol", command)
 
 
 if __name__ == "__main__":
