@@ -55,12 +55,14 @@ MAX_PREVIEW_TICKETS = 20
 MAX_CONCURRENT_REQUESTS = 8
 MAX_PROJECT_FILE_BYTES = 1_048_576
 MAX_PROJECT_FILES = 1000
+MAX_UNTRACKED_FINGERPRINT_BYTES = 128 * 1024 * 1024
 MAX_GAME_TICKETS = 100
 MAX_GAME_DRAWS = 50
 MAX_GAME_COMPARISONS = 5000
 EDITABLE_BRANCH = "feature/lotomaster-public-parity"
 MAX_BRANCH_DIFF_BYTES = 131_072
 MAX_CHECK_OUTPUT_CHARS = 8_000
+MAX_CHECK_CAPTURE_BYTES = 65_536
 MAX_CHECK_TIMEOUT_SECONDS = 120
 PROJECT_TEXT_EXTENSIONS = {
     ".py", ".md", ".html", ".js", ".mjs", ".cjs", ".css", ".json",
@@ -119,7 +121,9 @@ ou do README funcional na branch feature/lotomaster-public-parity, com SHA-256 e
 avaliações, mapeamentos e estudos congelados ficam fora do escopo. Também há
 revisão do diff e verificações fixas. A edição substitui atomicamente o arquivo
 permitido por um temporário transitório no mesmo diretório; não cria arquivos
-finais do projeto nem apaga arquivos. Não faz commit, push, merge ou deploy.
+finais do projeto nem apaga arquivos. A checagem SHA-256 é otimista e best-effort;
+ela não bloqueia escritores externos e pode haver corrida com outro processo.
+Não faz commit, push, merge ou deploy.
 HTTP permanece somente leitura.
 Não há ferramentas para editar estudos congelados, alterar jogos salvos, operar
 contas, apostar, acessar credenciais ou enviar dados a terceiros. Jogos
@@ -289,13 +293,22 @@ def _redact_sensitive_text(text: str) -> str:
     return _PRIVATE_KEY_BLOCK.sub("[REDACTED PRIVATE KEY BLOCK]", text)
 
 
-def _redact_response_value(value: Any) -> Any:
+def _redact_response_value(value: Any, *, preserve_digest_fields: bool = False) -> Any:
     if isinstance(value, str):
         return _redact_sensitive_text(value)
     if isinstance(value, list):
-        return [_redact_response_value(item) for item in value]
+        return [_redact_response_value(item, preserve_digest_fields=preserve_digest_fields) for item in value]
     if isinstance(value, dict):
-        return {key: _redact_response_value(item) for key, item in value.items()}
+        redacted = {}
+        for key, item in value.items():
+            if (
+                preserve_digest_fields and key in {"sha256", "previous_sha256"}
+                and isinstance(item, str) and re.fullmatch(r"[0-9a-fA-F]{64}", item)
+            ):
+                redacted[key] = item
+            else:
+                redacted[key] = _redact_response_value(item, preserve_digest_fields=preserve_digest_fields)
+        return redacted
     return value
 
 
@@ -397,6 +410,7 @@ def _read_project_file(arguments: dict[str, Any]) -> dict[str, Any]:
     end_line = start_line + len(selected) - 1 if selected else start_line - 1
     return {
         "path": resolved.relative_to(root).as_posix(),
+        "sha256": hashlib.sha256(raw).hexdigest(),
         "start_line": start_line,
         "end_line": end_line,
         "total_lines": len(lines),
@@ -411,7 +425,7 @@ BRANCH_EDIT_TOOLS: list[dict[str, Any]] = [
     {
         "name": "edit_branch_file",
         "title": "Editar arquivo existente na branch autorizada",
-        "description": "Substitui o conteúdo de um único arquivo de código existente sob lotomaster/ ou do README funcional, somente via stdio com opt-in e na branch feature/lotomaster-public-parity. Exige o SHA-256 atual. Avaliações, mapeamentos, estudos congelados e caminhos marcados como experimentos ficam bloqueados. Não cria novos arquivos do projeto nem apaga arquivos; a substituição atômica usa um temporário transitório no mesmo diretório. Não altera o banco nem faz commit ou publicação.",
+        "description": "Substitui o conteúdo de um único arquivo de código existente sob lotomaster/ ou do README funcional, somente via stdio com opt-in e na branch feature/lotomaster-public-parity. Exige o SHA-256 atual. A checagem otimista de conflito é best-effort e não bloqueia escritores externos; confirme o diff após editar. Avaliações, mapeamentos, estudos congelados e caminhos marcados como experimentos ficam bloqueados. Não cria novos arquivos do projeto nem apaga arquivos; a substituição atômica usa um temporário transitório no mesmo diretório. Não altera o banco nem faz commit ou publicação.",
         "inputSchema": {
             "type": "object", "properties": {
                 "path": {"type": "string", "description": "Caminho relativo canônico, por exemplo lotomaster/mcp_server.py."},
@@ -425,7 +439,7 @@ BRANCH_EDIT_TOOLS: list[dict[str, Any]] = [
     {
         "name": "review_branch_diff",
         "title": "Revisar diff local da branch autorizada",
-        "description": "Mostra o diff staged e unstaged de arquivos de código permitidos e do README funcional sob lotomaster/ na branch autorizada; nomes de arquivos não rastreados são listados sem conteúdo. Não altera arquivos nem inclui conteúdo de avaliações, mapeamentos, estudos congelados, arquivos ocultos ou fora do escopo.",
+        "description": "Mostra separadamente os diffs staged e unstaged de arquivos de código permitidos e do README funcional sob lotomaster/ na branch autorizada, além dos nomes staged; nomes de arquivos não rastreados são listados sem conteúdo. Também inclui exclusões de arquivos rastreados quando o preimage é seguro. Não altera arquivos nem inclui conteúdo de avaliações, mapeamentos, estudos congelados, arquivos ocultos ou fora do escopo.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     },
@@ -653,10 +667,10 @@ def _open_editable_file(requested: Any):
         or any(marker in filename for marker in ("secret", "credential", "password", "private_key"))
     ):
         raise ValueError("Esse arquivo não está no conjunto permitido para edição.")
-    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NONBLOCK"):
         raise ValueError("O sistema não oferece abertura segura de caminhos; a edição foi bloqueada.")
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    file_flags = os.O_RDONLY | os.O_NOFOLLOW
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
     root_fd = None
     parent_fd = None
     file_fd = None
@@ -741,16 +755,18 @@ def _edit_branch_file(arguments: dict[str, Any], transport: str) -> dict[str, An
             stream.flush()
             os.fsync(stream.fileno())
 
-        latest_fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        _assert_branch_edit_access(transport)
+        latest_fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
         try:
             latest_stat = os.fstat(latest_fd)
+            if not stat.S_ISREG(latest_stat.st_mode) or latest_stat.st_nlink != 1:
+                raise ValueError("O arquivo mudou para um tipo não permitido; nada foi sobrescrito.")
             latest_bytes = _read_fd_limited(latest_fd)
         finally:
             os.close(latest_fd)
         same_file = (latest_stat.st_dev, latest_stat.st_ino) == (old_stat.st_dev, old_stat.st_ino)
         if not same_file or not hmac.compare_digest(hashlib.sha256(latest_bytes).hexdigest(), expected.lower()):
             raise ValueError("O arquivo mudou durante a edição; nada foi sobrescrito.")
-        _assert_branch_edit_access(transport)
         os.replace(temp_name, filename, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
         temp_name = None
         try:
@@ -760,6 +776,7 @@ def _edit_branch_file(arguments: dict[str, Any], transport: str) -> dict[str, An
         return {
             "path": arguments["path"], "branch": branch, "changed": True,
             "previous_sha256": current_hash, "sha256": hashlib.sha256(new_bytes).hexdigest(),
+            "concurrency_check": "best-effort; escritores externos não são bloqueados",
             "review_required": True, "next_tool": "review_branch_diff",
             "committed": False, "published": False,
         }
@@ -785,23 +802,69 @@ def _is_editable_branch_path(path: str) -> bool:
     return Path(path).suffix.lower() in EDITABLE_CODE_EXTENSIONS or path in EDITABLE_DOC_PATHS
 
 
-def _safe_changed_paths() -> list[str]:
-    changed = _git_output(["diff", "--name-only", "-z", "HEAD", "--", "lotomaster"]).split("\0")
+def _tracked_preimage_is_safe(path: str) -> bool:
+    try:
+        entries = _git_output([
+            "ls-tree", "-z", "--full-tree", "HEAD", "--", f":(literal){path}",
+        ]).split("\0")
+        entry = next((item for item in entries if "\t" in item and item.split("\t", 1)[1] == path), "")
+        if not entry:
+            return False
+        metadata, stored_path = entry.split("\t", 1)
+        mode, object_type, object_id = metadata.split(" ", 2)
+        if stored_path != path or mode not in {"100644", "100755"} or object_type != "blob":
+            return False
+        size = _git_output(["cat-file", "-s", object_id]).strip()
+        return size.isdecimal() and int(size) <= MAX_PROJECT_FILE_BYTES
+    except (ValueError, StopIteration):
+        return False
+
+
+def _safe_changed_paths() -> tuple[list[str], list[str]]:
+    staged = _git_output([
+        "diff", "--cached", "--name-only", "-z", "HEAD", "--", "lotomaster",
+    ]).split("\0")
+    unstaged = _git_output(["diff", "--name-only", "-z", "--", "lotomaster"]).split("\0")
     safe = {item["path"] for item in _project_file_index()}
-    return sorted({path for path in changed if path and path in safe and _is_editable_branch_path(path)})
+
+    def keep_allowed(paths: list[str]) -> list[str]:
+        accepted = set()
+        for path in paths:
+            if not path or not _is_editable_branch_path(path):
+                continue
+            if path in safe:
+                accepted.add(path)
+                continue
+            candidate = REPO_ROOT / path
+            if not os.path.lexists(candidate) and _tracked_preimage_is_safe(path):
+                accepted.add(path)
+        return sorted(accepted)
+
+    return keep_allowed(staged), keep_allowed(unstaged)
 
 
 def _review_branch_diff(transport: str) -> dict[str, Any]:
     branch = _assert_branch_edit_access(transport)
-    changed_paths = _safe_changed_paths()
-    if changed_paths:
-        literal_paths = [f":(literal){path}" for path in changed_paths]
-        diff = _git_output([
-            "diff", "--no-ext-diff", "--no-color", "--no-renames", "--unified=3",
-            "HEAD", "--", *literal_paths,
+    staged_paths, unstaged_paths = _safe_changed_paths()
+    changed_paths = sorted(set(staged_paths) | set(unstaged_paths))
+    diff_parts = []
+    if staged_paths:
+        literal_staged = [f":(literal){path}" for path in staged_paths]
+        staged_diff = _git_output([
+            "diff", "--cached", "--no-ext-diff", "--no-color", "--no-renames", "--unified=3",
+            "HEAD", "--", *literal_staged,
         ])
-    else:
-        diff = ""
+        if staged_diff:
+            diff_parts.append("Staged changes:\n" + staged_diff)
+    if unstaged_paths:
+        literal_unstaged = [f":(literal){path}" for path in unstaged_paths]
+        unstaged_diff = _git_output([
+            "diff", "--no-ext-diff", "--no-color", "--no-renames", "--unified=3",
+            "--", *literal_unstaged,
+        ])
+        if unstaged_diff:
+            diff_parts.append("Unstaged changes:\n" + unstaged_diff)
+    diff = _redact_sensitive_text("\n".join(diff_parts))
     safe = {item["path"] for item in _project_file_index()}
     untracked = _git_output([
         "ls-files", "--others", "--exclude-standard", "-z", "--", "lotomaster",
@@ -815,6 +878,7 @@ def _review_branch_diff(transport: str) -> dict[str, Any]:
         "branch": branch,
         "scope": "lotomaster/",
         "changed_files": changed_paths,
+        "staged_files": staged_paths,
         "untracked_files_without_contents": safe_untracked,
         "diff": _redact_sensitive_text(diff),
         "diff_complete": complete,
@@ -824,42 +888,172 @@ def _review_branch_diff(transport: str) -> dict[str, Any]:
     }
 
 
+def _safe_untracked_file_digest(relative_path: str) -> bytes:
+    parts = relative_path.split("/")
+    if not relative_path or relative_path.startswith("/") or any(part in {"", ".", ".."} for part in parts):
+        raise ValueError("Caminho untracked inválido; não foi possível verificar o checkout.")
+    if not all(hasattr(os, flag) for flag in ("O_NOFOLLOW", "O_DIRECTORY", "O_NONBLOCK")):
+        raise ValueError("O sistema não oferece abertura segura; não foi possível verificar o checkout.")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    root_fd = None
+    parent_fd = None
+    file_fd = None
+    try:
+        root_fd = os.open(REPO_ROOT.resolve(), directory_flags)
+        parent_fd = os.dup(root_fd)
+        for part in parts[:-1]:
+            next_fd = os.open(part, directory_flags, dir_fd=parent_fd)
+            os.close(parent_fd)
+            parent_fd = next_fd
+        file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+        before = os.fstat(file_fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_PROJECT_FILE_BYTES:
+            raise ValueError("Arquivo untracked fora dos limites de verificação segura.")
+        raw = _read_fd_limited(file_fd)
+        after = os.fstat(file_fd)
+        current_path = os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
+        before_signature = (
+            before.st_dev, before.st_ino, before.st_mode, before.st_size, before.st_mtime_ns, before.st_ctime_ns,
+        )
+        after_signature = (
+            after.st_dev, after.st_ino, after.st_mode, after.st_size, after.st_mtime_ns, after.st_ctime_ns,
+        )
+        path_signature = (
+            current_path.st_dev, current_path.st_ino, current_path.st_mode, current_path.st_size,
+            current_path.st_mtime_ns, current_path.st_ctime_ns,
+        )
+        if (
+            len(raw) > MAX_PROJECT_FILE_BYTES or len(raw) != before.st_size
+            or before_signature != after_signature or after_signature != path_signature
+        ):
+            raise ValueError("Arquivo untracked mudou durante a verificação do checkout.")
+        return hashlib.sha256(raw).digest()
+    except OSError:
+        raise ValueError("Arquivo untracked inacessível; não foi possível verificar o checkout.") from None
+    finally:
+        for descriptor in (file_fd, parent_fd, root_fd):
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
+
+def _safe_untracked_project_files() -> list[str]:
+    untracked = _git_output(["ls-files", "--others", "--exclude-standard", "-z"]).split("\0")
+    safe_paths = []
+    total_bytes = 0
+    root = REPO_ROOT.resolve()
+    for path in sorted({item for item in untracked if item}):
+        parts = path.split("/")
+        if path.startswith("/") or any(part in {"", ".", ".."} for part in parts):
+            raise ValueError("Git retornou um caminho untracked inválido; a verificação foi bloqueada.")
+        candidate = root.joinpath(*parts)
+        if not _is_safe_project_file(candidate):
+            continue
+        try:
+            size = candidate.stat().st_size
+        except OSError:
+            raise ValueError("Arquivo untracked mudou durante a verificação do checkout.") from None
+        safe_paths.append(path)
+        total_bytes += size
+        if len(safe_paths) > MAX_PROJECT_FILES or total_bytes > MAX_UNTRACKED_FINGERPRINT_BYTES:
+            raise ValueError("Há muitos arquivos untracked seguros para fingerprint completo.")
+    return safe_paths
+
+
 def _working_tree_fingerprint() -> str:
     digest = hashlib.sha256()
-    status = _git_output(["status", "--porcelain=v1", "--untracked-files=all", "--", "lotomaster"])
-    diff = _git_output(["diff", "--binary", "--no-ext-diff", "--no-color", "HEAD", "--", "lotomaster"])
+    status = _git_output(["status", "--porcelain=v1", "--untracked-files=all"])
+    diff = _git_output(["diff", "--binary", "--no-ext-diff", "--no-color", "HEAD", "--"])
+    staged_diff = _git_output([
+        "diff", "--cached", "--binary", "--no-ext-diff", "--no-color", "HEAD", "--",
+    ])
     digest.update(status.encode("utf-8", errors="replace"))
     digest.update(diff.encode("utf-8", errors="replace"))
-    safe = {item["path"] for item in _project_file_index()}
-    untracked = _git_output([
-        "ls-files", "--others", "--exclude-standard", "-z", "--", "lotomaster",
-    ]).split("\0")
-    for path in sorted({item for item in untracked if item and item in safe}):
+    digest.update(hashlib.sha256(staged_diff.encode("utf-8", errors="replace")).digest())
+    for path in _safe_untracked_project_files():
         digest.update(path.encode("utf-8", errors="replace"))
-        try:
-            digest.update(hashlib.sha256((REPO_ROOT / path).read_bytes()).digest())
-        except OSError:
-            digest.update(b"unreadable")
+        digest.update(_safe_untracked_file_digest(path))
     return digest.hexdigest()
 
 
 def _run_fixed_check(label: str, command: list[str], env: dict[str, str], timeout: int) -> dict[str, Any]:
     try:
-        completed = subprocess.run(
-            command, cwd=REPO_ROOT, env=env, capture_output=True,
-            text=True, encoding="utf-8", errors="replace", timeout=timeout, check=False,
+        process = subprocess.Popen(
+            command, cwd=REPO_ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            bufsize=0,
         )
-        output = _redact_sensitive_text((completed.stdout + "\n" + completed.stderr).strip())
-        truncated = len(output) > MAX_CHECK_OUTPUT_CHARS
-        return {
-            "check": label, "passed": completed.returncode == 0,
-            "return_code": completed.returncode,
-            "output_excerpt": output[:MAX_CHECK_OUTPUT_CHARS], "output_truncated": truncated,
-        }
-    except subprocess.TimeoutExpired:
-        return {"check": label, "passed": False, "timed_out": True, "output_excerpt": "Tempo limite excedido."}
     except OSError:
         return {"check": label, "passed": False, "output_excerpt": "Verificação indisponível no ambiente."}
+
+    captured = {"stdout": bytearray(), "stderr": bytearray()}
+    capture_lock = threading.Lock()
+    captured_size = [0]
+    output_limit_exceeded = threading.Event()
+    reader_failed = threading.Event()
+
+    def drain(name: str, stream: Any) -> None:
+        try:
+            while True:
+                chunk = stream.read(8192)
+                if not chunk:
+                    break
+                with capture_lock:
+                    remaining = MAX_CHECK_CAPTURE_BYTES - captured_size[0]
+                    if remaining > 0:
+                        kept = chunk[:remaining]
+                        captured[name].extend(kept)
+                        captured_size[0] += len(kept)
+                    if len(chunk) > max(remaining, 0):
+                        output_limit_exceeded.set()
+        except OSError:
+            reader_failed.set()
+
+    readers = [
+        threading.Thread(target=drain, args=("stdout", process.stdout), daemon=True),
+        threading.Thread(target=drain, args=("stderr", process.stderr), daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+    timed_out = False
+    try:
+        return_code = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            process.kill()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+        return_code = process.returncode
+    for reader in readers:
+        reader.join(timeout=1)
+    readers_stopped = all(not reader.is_alive() for reader in readers)
+    if not readers_stopped:
+        reader_failed.set()
+    else:
+        process.stdout.close()
+        process.stderr.close()
+    if timed_out:
+        return {"check": label, "passed": False, "timed_out": True, "output_excerpt": "Tempo limite excedido."}
+    if output_limit_exceeded.is_set() or reader_failed.is_set():
+        return {
+            "check": label, "passed": False, "return_code": return_code,
+            "output_limit_exceeded": output_limit_exceeded.is_set(),
+            "output_excerpt": "Saída excedeu o limite de captura; detalhes omitidos.",
+        }
+    output = (bytes(captured["stdout"]) + b"\n" + bytes(captured["stderr"])).decode("utf-8", errors="replace")
+    output = _redact_sensitive_text(output.strip())
+    truncated = len(output) > MAX_CHECK_OUTPUT_CHARS
+    return {
+        "check": label, "passed": return_code == 0,
+        "return_code": return_code,
+        "output_excerpt": output[:MAX_CHECK_OUTPUT_CHARS], "output_truncated": truncated,
+    }
 
 
 def _run_branch_checks(transport: str) -> dict[str, Any]:
@@ -906,7 +1100,7 @@ def _run_branch_checks(transport: str) -> dict[str, Any]:
                 ))
         checks.append(_run_fixed_check(
             "git_diff_check",
-            ["git", "-C", str(REPO_ROOT.resolve()), "diff", "--check", "HEAD", "--", "lotomaster"],
+            ["git", "-C", str(REPO_ROOT.resolve()), "diff", "--check", "HEAD", "--"],
             child_env, 20,
         ))
     after = _working_tree_fingerprint()
@@ -1053,7 +1247,10 @@ def _dispatch(message: Any, *, transport: str = "unknown") -> dict[str, Any] | N
             result = {"content": [{"type": "text", "text": "Ferramenta não encontrada."}], "isError": True}
         else:
             try:
-                value = _redact_response_value(_tool_result(name, arguments, transport=transport))
+                value = _redact_response_value(
+                    _tool_result(name, arguments, transport=transport),
+                    preserve_digest_fields=name in {"read_project_file", "edit_branch_file"},
+                )
                 text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
                 result = {"content": [{"type": "text", "text": text}], "structuredContent": value, "isError": False}
             except (ValueError, KeyError) as exc:

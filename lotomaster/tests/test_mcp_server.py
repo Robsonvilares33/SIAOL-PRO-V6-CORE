@@ -193,6 +193,7 @@ class MCPReadOnlyTests(unittest.TestCase):
                 self.assertNotIn("sk-abcdefghijklmnopqrstuvwxyz0123456789", text)
                 self.assertNotIn("0123456789abcdefghijklmnopqrstuvwxyz", text)
                 self.assertNotIn("generic-secret-value-not-a-known-token-prefix", text)
+                self.assertEqual(read["sha256"], hashlib.sha256((root / "app.py").read_bytes()).hexdigest())
                 self.assertNotIn("outside-link.py", paths)
                 with self.assertRaisesRegex(ValueError, "fora do escopo"):
                     mcp_server._tool_result("read_project_file", {"path": "outside-link.py"})
@@ -294,7 +295,9 @@ class MCPBranchEditTests(unittest.TestCase):
             disabled = mcp_server._dispatch({"jsonrpc": "2.0", "id": 0, "method": "tools/list"}, transport="stdio")
             disabled_names = {item["name"] for item in disabled["result"]["tools"]}
             self.assertEqual(len(disabled_names), 9)
-        with patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"}):
+        temporary, root, _ = self._repo()
+        self.addCleanup(temporary.cleanup)
+        with patch.object(mcp_server, "REPO_ROOT", root), patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"}):
             stdio = mcp_server._dispatch({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, transport="stdio")
             stdio_init = mcp_server._dispatch({"jsonrpc": "2.0", "id": 5, "method": "initialize", "params": {}}, transport="stdio")
             http = mcp_server._dispatch({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, transport="http")
@@ -316,18 +319,203 @@ class MCPBranchEditTests(unittest.TestCase):
         original_hash = hashlib.sha256(target.read_bytes()).hexdigest()
         new_content = 'api_key = "sk-abcdefghijklmnopqrstuvwxyz0123456789"\n'
         with patch.object(mcp_server, "REPO_ROOT", root), patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"}):
-            result = mcp_server._tool_result("edit_branch_file", {
-                "path": "lotomaster/script.py", "expected_sha256": original_hash, "content": new_content,
-            }, transport="stdio")
+            read = mcp_server._dispatch({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "read_project_file", "arguments": {"path": "lotomaster/script.py"}},
+            }, transport="stdio")["result"]["structuredContent"]
+            result = mcp_server._dispatch({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "edit_branch_file", "arguments": {
+                    "path": "lotomaster/script.py", "expected_sha256": original_hash, "content": new_content,
+                }},
+            }, transport="stdio")["result"]["structuredContent"]
             review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
+        self.assertEqual(read["sha256"], original_hash)
         self.assertTrue(result["changed"])
         self.assertFalse(result["committed"])
         self.assertFalse(result["published"])
+        self.assertEqual(result["previous_sha256"], original_hash)
+        self.assertEqual(result["sha256"], hashlib.sha256(new_content.encode("utf-8")).hexdigest())
+        self.assertIn("best-effort", result["concurrency_check"])
         self.assertEqual(target.read_text(encoding="utf-8"), new_content)
         self.assertEqual(list((root / "lotomaster").glob(".lotomaster-mcp-edit-*.tmp")), [])
         self.assertEqual(review["changed_files"], ["lotomaster/script.py"])
         self.assertIn("[REDACTED]", review["diff"])
         self.assertNotIn("sk-abcdefghijklmnopqrstuvwxyz0123456789", review["diff"])
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO requer suporte POSIX")
+    def test_edit_rejects_fifo_without_blocking(self):
+        temporary, root, _ = self._repo()
+        self.addCleanup(temporary.cleanup)
+        fifo = root / "lotomaster" / "pipe.py"
+        os.mkfifo(fifo)
+        with patch.object(mcp_server, "REPO_ROOT", root), patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"}):
+            with self.assertRaisesRegex(ValueError, "arquivo regular"):
+                mcp_server._tool_result("edit_branch_file", {
+                    "path": "lotomaster/pipe.py", "expected_sha256": "0" * 64, "content": "safe\n",
+                }, transport="stdio")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO requer suporte POSIX")
+    def test_edit_rejects_fifo_on_reopen_without_blocking(self):
+        temporary, root, target = self._repo()
+        self.addCleanup(temporary.cleanup)
+        original_open = os.open
+        file_open_count = 0
+
+        def replace_with_fifo_before_reopen(path, flags, *args, **kwargs):
+            nonlocal file_open_count
+            if path == "script.py" and kwargs.get("dir_fd") is not None:
+                file_open_count += 1
+                if file_open_count == 2:
+                    target.unlink()
+                    os.mkfifo(target)
+            return original_open(path, flags, *args, **kwargs)
+
+        with (
+            patch.object(mcp_server, "REPO_ROOT", root),
+            patch.object(mcp_server.os, "open", side_effect=replace_with_fifo_before_reopen),
+            patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"}),
+        ):
+            with self.assertRaisesRegex(ValueError, "tipo não permitido"):
+                mcp_server._tool_result("edit_branch_file", {
+                    "path": "lotomaster/script.py", "expected_sha256": hashlib.sha256(b"before\n").hexdigest(),
+                    "content": "safe\n",
+                }, transport="stdio")
+        self.assertEqual(file_open_count, 2)
+
+    def test_review_separates_staged_and_unstaged_changes_and_keeps_safe_deletions(self):
+        temporary, root, target = self._repo()
+        self.addCleanup(temporary.cleanup)
+        deleted = root / "lotomaster" / "deleted.py"
+        deleted.write_text("tracked preimage\n", encoding="utf-8")
+        self._git(root, "add", "lotomaster/deleted.py")
+        self._git(root, "commit", "-q", "-m", "add deletable module")
+        target.write_text("staged version\n", encoding="utf-8")
+        self._git(root, "add", "lotomaster/script.py")
+        target.write_text("working-tree version\n", encoding="utf-8")
+        deleted.unlink()
+        with patch.object(mcp_server, "REPO_ROOT", root), patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"}):
+            review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
+        self.assertEqual(review["staged_files"], ["lotomaster/script.py"])
+        self.assertEqual(review["changed_files"], ["lotomaster/deleted.py", "lotomaster/script.py"])
+        self.assertIn("Staged changes:", review["diff"])
+        self.assertIn("Unstaged changes:", review["diff"])
+        self.assertIn("tracked preimage", review["diff"])
+        self.assertIn("staged version", review["diff"])
+        self.assertIn("working-tree version", review["diff"])
+
+    def test_diff_redacts_a_complete_private_key_before_truncation(self):
+        temporary, root, target = self._repo()
+        self.addCleanup(temporary.cleanup)
+        prefix = "diff --git a/lotomaster/script.py b/lotomaster/script.py\n" + ("context " * 14) + ("padding " * 4) + "\n"
+        private_key = "-----BEGIN PRIVATE KEY-----\n" + ("SECRETKEYMATERIAL0123456789\n" * 30) + "-----END PRIVATE KEY-----\n"
+        synthetic_diff = prefix + private_key + ("tail " * 100)
+
+        def fake_git(arguments, *, timeout=10):
+            if arguments == ["rev-parse", "--show-toplevel"]:
+                return str(root) + "\n"
+            if arguments == ["branch", "--show-current"]:
+                return mcp_server.EDITABLE_BRANCH + "\n"
+            if "--name-only" in arguments and "--cached" in arguments:
+                return ""
+            if "--name-only" in arguments:
+                return "lotomaster/script.py\0"
+            if "--no-ext-diff" in arguments:
+                return synthetic_diff
+            if arguments[:2] == ["ls-files", "--others"]:
+                return ""
+            raise AssertionError(arguments)
+
+        with (
+            patch.object(mcp_server, "REPO_ROOT", root),
+            patch.object(mcp_server, "MAX_BRANCH_DIFF_BYTES", 256),
+            patch.object(mcp_server, "_git_output", side_effect=fake_git),
+            patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"}),
+        ):
+            review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
+        self.assertFalse(review["diff_complete"])
+        self.assertTrue(review["secrets_redacted"])
+        self.assertIn("[REDACTED PRIVATE KEY BLOCK]", review["diff"])
+        self.assertNotIn("SECRETKEYMATERIAL", review["diff"])
+        self.assertNotIn("-----BEGIN PRIVATE KEY-----", review["diff"])
+
+    def test_fixed_check_bounds_output_redacts_retained_text_and_keeps_timeout(self):
+        secret = "-----BEGIN PRIVATE KEY-----\nSECRETKEYMATERIAL0123456789\n-----END PRIVATE KEY-----"
+        retained = mcp_server._run_fixed_check(
+            "redaction", [sys.executable, "-c", "import sys;sys.stdout.write(sys.argv[1])", secret],
+            os.environ.copy(), 5,
+        )
+        self.assertTrue(retained["passed"])
+        self.assertNotIn("SECRETKEYMATERIAL", retained["output_excerpt"])
+        self.assertIn("[REDACTED PRIVATE KEY BLOCK]", retained["output_excerpt"])
+        with patch.object(mcp_server, "MAX_CHECK_CAPTURE_BYTES", 128):
+            overflow = mcp_server._run_fixed_check(
+                "overflow", [sys.executable, "-c", "print('S' * 10000)"], os.environ.copy(), 5,
+            )
+        self.assertFalse(overflow["passed"])
+        self.assertTrue(overflow["output_limit_exceeded"])
+        self.assertNotIn("S" * 80, overflow["output_excerpt"])
+        timed_out = mcp_server._run_fixed_check(
+            "timeout", [sys.executable, "-c", "import time;time.sleep(10)"], os.environ.copy(), 0.01,
+        )
+        self.assertTrue(timed_out["timed_out"])
+
+    def test_fingerprint_covers_repository_wide_and_staged_content(self):
+        temporary, root, target = self._repo()
+        self.addCleanup(temporary.cleanup)
+        outside = root / "tracked.py"
+        outside.write_text("original\n", encoding="utf-8")
+        self._git(root, "add", "tracked.py")
+        self._git(root, "commit", "-q", "-m", "add outside tracked file")
+        with patch.object(mcp_server, "REPO_ROOT", root):
+            clean = mcp_server._working_tree_fingerprint()
+            outside.write_text("changed outside lotomaster\n", encoding="utf-8")
+            outside_changed = mcp_server._working_tree_fingerprint()
+            self.assertNotEqual(clean, outside_changed)
+            outside.write_text("original\n", encoding="utf-8")
+
+            untracked = root / "outside_untracked.py"
+            untracked.write_text("first untracked content\n", encoding="utf-8")
+            untracked_first = mcp_server._working_tree_fingerprint()
+            untracked.write_text("second untracked content\n", encoding="utf-8")
+            untracked_second = mcp_server._working_tree_fingerprint()
+            self.assertNotEqual(untracked_first, untracked_second)
+            untracked.unlink()
+
+            target.write_text("first staged content\n", encoding="utf-8")
+            self._git(root, "add", "lotomaster/script.py")
+            target.write_text("before\n", encoding="utf-8")
+            staged_first = mcp_server._working_tree_fingerprint()
+            target.write_text("second staged content\n", encoding="utf-8")
+            self._git(root, "add", "lotomaster/script.py")
+            target.write_text("before\n", encoding="utf-8")
+            staged_second = mcp_server._working_tree_fingerprint()
+        self.assertNotEqual(staged_first, staged_second)
+
+    def test_check_runner_reports_tracked_changes_outside_lotomaster(self):
+        temporary, root, _ = self._repo()
+        self.addCleanup(temporary.cleanup)
+        outside = root / "tracked.py"
+        outside.write_text("before\n", encoding="utf-8")
+        self._git(root, "add", "tracked.py")
+        self._git(root, "commit", "-q", "-m", "add outside tracked file")
+        changed = []
+
+        def fake_check(label, command, env, timeout):
+            if not changed:
+                outside.write_text("modified by check\n", encoding="utf-8")
+                changed.append(True)
+            return {"check": label, "passed": True}
+
+        with (
+            patch.object(mcp_server, "REPO_ROOT", root),
+            patch.object(mcp_server, "_assert_branch_edit_access", return_value=mcp_server.EDITABLE_BRANCH),
+            patch.object(mcp_server, "_run_fixed_check", side_effect=fake_check),
+            patch.object(mcp_server.shutil, "which", return_value="/usr/bin/node"),
+        ):
+            result = mcp_server._run_branch_checks("stdio")
+        self.assertFalse(result["working_tree_unchanged"])
+        self.assertFalse(result["all_passed"])
 
     def test_stale_hash_wrong_branch_and_unsafe_paths_do_not_write(self):
         temporary, root, target = self._repo()
