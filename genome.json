@@ -1,14 +1,14 @@
 {
-  "version": "9.0.153",
-  "generation": 647,
+  "version": "9.0.154",
+  "generation": 650,
   "weights": {
-    "freq": 0.1613,
-    "gap": 0.1873,
-    "markov": 0.0354,
-    "window": 0.2437,
-    "cycle": 0.15,
-    "trend": 0.114,
-    "pair": 0.1083
+    "freq": 0.1792,
+    "gap": 0.1709,
+    "markov": 0.0323,
+    "window": 0.2777,
+    "cycle": 0.1369,
+    "trend": 0.104,
+    "pair": 0.0988
   },
   "sharp_exp": 1.17,
   "core_pct": 0.455,
@@ -17,11 +17,11 @@
   "windows": [
     {
       "size": 5,
-      "weight": 8.03
+      "weight": 8.67
     },
     {
       "size": 10,
-      "weight": 5.69
+      "weight": 6.72
     },
     {
       "size": 20,
@@ -812,6 +812,11 @@
       "gen": 642,
       "fitness": 11.4333,
       "timestamp": "2026-11-21T20:50:35.746754"
+    },
+    {
+      "gen": 650,
+      "fitness": 11.1667,
+      "timestamp": "2026-11-24T23:48:55.236703"
     }
   ]
 }
