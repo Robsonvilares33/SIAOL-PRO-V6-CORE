@@ -4,6 +4,7 @@ from itertools import combinations
 import math
 
 from .catalog import get_spec, get_stats
+from .validation import validate_draws
 
 
 def _is_prime(n: int) -> bool:
@@ -27,15 +28,44 @@ def _number_values(draw: dict, key: str) -> list[int]:
     return list(draw.get("numbers", []))
 
 
+def pareto_filter_data(game: str, draws: list[dict]) -> dict:
+    """Return the local 80%-appearance selection and its observed scope."""
+    spec = get_spec(game)
+    ordered = sorted(draws or [], key=lambda d: int(d.get("contest", 0)), reverse=True)
+    rows = [_number_values(draw, spec["key"]) for draw in ordered]
+    if spec["key"] == "supersete":
+        rows = [set(row) for row in rows]
+    counts = Counter(number for row in rows for number in row)
+    total = sum(counts.values())
+    selected = []
+    selected_appearances = 0
+    if total:
+        for number, count in sorted(counts.items(), key=lambda pair: (-pair[1], pair[0])):
+            if selected_appearances >= total * 0.8:
+                break
+            selected.append(number)
+            selected_appearances += count
+    return {
+        "numbers": selected,
+        "draws_analyzed": len(ordered),
+        "latest_contest": ordered[0].get("contest") if ordered else None,
+        "total_appearances": total,
+        "target_percent": 80,
+        "target_appearances": total * 0.8,
+        "selected_appearances": selected_appearances,
+    }
+
+
 def analyze_draws(game: str, draws: list[dict]) -> dict:
     spec = get_spec(game)
     key = spec["key"]
-    ordered_draws = sorted(draws or [], key=lambda d: int(d.get("contest", 0)), reverse=True)
+    ordered_draws = sorted(validate_draws(key, draws), key=lambda d: d["contest"], reverse=True)
     n_draws = len(ordered_draws)
     low, high = spec["minimum"], spec["maximum"]
     pool = list(range(low, high + 1))
     all_numbers = [_number_values(d, key) for d in ordered_draws]
-    counts = Counter(n for row in all_numbers for n in row)
+    # Super Sete can repeat a digit in different columns; frequency is per draw.
+    counts = Counter(n for row in all_numbers for n in set(row))
     denominator = max(n_draws, 1)
     frequency = []
     gaps = []
@@ -54,10 +84,18 @@ def analyze_draws(game: str, draws: list[dict]) -> dict:
     sums = [sum(row) for row in all_numbers]
     even_odd = Counter((sum(n % 2 == 0 for n in row), sum(n % 2 != 0 for n in row)) for row in all_numbers)
     repeated = []
+    consecutive_pairs = []
+    skipped_pair_boundaries = []
     for i in range(len(all_numbers) - 1):
+        newer_contest = _contest_number(ordered_draws[i])
+        older_contest = _contest_number(ordered_draws[i + 1])
+        if newer_contest is None or older_contest is None or newer_contest - older_contest != 1:
+            skipped_pair_boundaries.append({"newer_contest": ordered_draws[i].get("contest"), "older_contest": ordered_draws[i + 1].get("contest")})
+            continue
         current = set(all_numbers[i])
         previous = set(all_numbers[i + 1])
         repeated.append(len(current & previous))
+        consecutive_pairs.append([ordered_draws[i].get("contest"), ordered_draws[i + 1].get("contest")])
     pair_counts = Counter()
     triple_counts = Counter()
     for row in all_numbers:
@@ -106,17 +144,16 @@ def analyze_draws(game: str, draws: list[dict]) -> dict:
         layout["number_grid"] = _lotomania_grid_summary(all_numbers)
     special = _special_distribution(key, ordered_draws)
     latest = ordered_draws[0] if ordered_draws else None
-    previous_repeats = len(set(all_numbers[0]) & set(all_numbers[1])) if len(all_numbers) > 1 else 0
+    latest_pair_comparable = (
+        len(all_numbers) > 1
+        and _contest_number(ordered_draws[0]) is not None
+        and _contest_number(ordered_draws[1]) is not None
+        and _contest_number(ordered_draws[0]) - _contest_number(ordered_draws[1]) == 1
+    )
+    previous_repeats = len(set(all_numbers[0]) & set(all_numbers[1])) if latest_pair_comparable else 0
     cycle = _cycle_progress(pool, all_numbers)
-    total_appearances = sum(counts.values()) or 1
-    pareto_target = total_appearances * 0.8
-    pareto_numbers = []
-    cumulative = 0
-    for row in frequency:
-        if cumulative >= pareto_target:
-            break
-        pareto_numbers.append(row["number"])
-        cumulative += row["count"]
+    pareto = pareto_filter_data(key, ordered_draws)
+    total_appearances = pareto["total_appearances"]
 
     tables = {
         "analysis": {"title": "Análise dos Números", "rows": frequency[:25]},
@@ -125,13 +162,13 @@ def analyze_draws(game: str, draws: list[dict]) -> dict:
         "frequency": {"title": "Frequência dos Números mais Sorteados", "rows": frequency},
         "delays": {"title": "Sequências e Atrasos", "rows": gaps},
         "parity": {"title": "Pares e Ímpares", "rows": parity_rows},
-        "repeats": {"title": "Repetidas do Concurso Anterior", "data": {"latest_repeats": previous_repeats, "history": repeated}},
+        "repeats": {"title": "Repetidas do Concurso Anterior", "data": {"latest_repeats": previous_repeats, "latest_comparison_available": latest_pair_comparable, "history": repeated, "consecutive_contest_pairs": consecutive_pairs, "skipped_pair_boundaries": skipped_pair_boundaries}},
         "primes": {"title": "Números Primos", "data": {"prime_numbers": primes, "prime_appearances": prime_hits}},
         "sums": {"title": "Somas dos Números", "data": sum_summary},
         "fibonacci": {"title": "Números de Fibonacci", "data": {"numbers": fibonacci, "appearances": fibonacci_hits}},
         "multiples3": {"title": "Números Múltiplos de Três", "data": {"numbers": [n for n in pool if n % 3 == 0], "appearances": multiple3_hits}},
         "order": {"title": "Ordem de Sorteio e Posição Detalhada", "rows": [{"contest": d.get("contest"), "ordered_numbers": d.get("ordered_numbers", d.get("numbers", []))} for d in ordered_draws[:30]]},
-        "pareto": {"title": "Princípio de Pareto", "data": {"top_numbers_for_80_percent_of_hits": pareto_numbers, "total_appearances": total_appearances}},
+        "pareto": {"title": "Princípio de Pareto", "data": {"top_numbers_for_80_percent_of_hits": pareto["numbers"], "total_appearances": total_appearances, "draws_analyzed": pareto["draws_analyzed"], "latest_contest": pareto["latest_contest"], "target_percent": pareto["target_percent"], "selected_appearances": pareto["selected_appearances"]}},
         "lines-columns": {"title": "Dezenas por Linhas e Colunas", "data": layout},
         "frame-center": {"title": "Dezenas na Moldura e Centro", "data": layout.get("frame_center", {})},
         "missing": {"title": "Dezenas Ausentes", "data": {"numbers_not_seen_in_period": missing}},
@@ -153,10 +190,10 @@ def analyze_draws(game: str, draws: list[dict]) -> dict:
         elif stat_id == "second-draw":
             second_rows = [d.get("second_numbers", []) for d in ordered_draws if d.get("second_numbers")]
             second_counts = Counter(n for row in second_rows for n in row)
-            tables[stat_id] = {"title": stat_label, "data": {"draws_analyzed": len(second_rows), "frequency": [{"number": n, "count": second_counts[n]} for n in sorted(second_counts)], "most_frequent": [{"number": n, "count": c} for n, c in second_counts.most_common(15)], "note": "Calculada separadamente a partir das dezenas do segundo sorteio oficial."}}
+            tables[stat_id] = {"title": stat_label, "data": {"draws_analyzed": len(second_rows), "frequency": [{"number": n, "count": second_counts[n]} for n in sorted(second_counts)], "most_frequent": [{"number": n, "count": c} for n, c in second_counts.most_common(15)], "note": "Calculada separadamente a partir das dezenas do segundo sorteio informado; a origem não é verificada por esta análise."}}
         elif stat_id in {"independencia", "special-draw", "quina-sao-joao", "easter"}:
             marked = [d for d in ordered_draws if d.get("special_draw")]
-            tables[stat_id] = {"title": stat_label, "data": {"officially_marked_special_draws": len(marked), "contests": [d.get("contest") for d in marked], "note": "Usa o indicador público de concurso especial retornado pela CAIXA; a classificação por evento pode variar."}}
+            tables[stat_id] = {"title": stat_label, "data": {"marked_special_draws": len(marked), "contests": [d.get("contest") for d in marked], "note": "Usa o indicador de concurso especial informado nos dados; a origem não é verificada e a classificação por evento pode variar."}}
         elif stat_id in {"final-zero", "final-five"}:
             divisor = 10 if stat_id == "final-zero" else 5
             selected = [d for d in ordered_draws if int(d.get("contest", 0)) % divisor == 0]
@@ -169,8 +206,10 @@ def analyze_draws(game: str, draws: list[dict]) -> dict:
                 for number in row:
                     bands[(number - low) * band_count // max(high - low + 1, 1)]["hits"] += 1
             tables[stat_id] = {"title": stat_label, "data": {"numeric_bands": [{"band": i + 1, "hits": bands[i]["hits"]} for i in range(band_count)], "note": "As páginas públicas não especificam a regra proprietária de naipes; são exibidas faixas numéricas equilibradas."}}
-        elif stat_id in {"months", "months-repeat"}:
+        elif stat_id == "months":
             tables[stat_id] = {"title": stat_label, "data": special.get("months", {})}
+        elif stat_id == "months-repeat":
+            tables[stat_id] = {"title": stat_label, "data": special.get("months_repeat", {})}
         elif stat_id == "teams":
             tables[stat_id] = {"title": stat_label, "data": special.get("teams", {})}
         elif stat_id == "team-delays":
@@ -207,6 +246,14 @@ def analyze_draws(game: str, draws: list[dict]) -> dict:
         "statistics_catalog": get_stats(spec),
         "disclaimer": "Frequências e atrasos descrevem apenas o histórico informado. Eles não aumentam nem preveem a probabilidade matemática de um resultado futuro.",
     }
+
+
+def _contest_number(draw: dict) -> int | None:
+    """Return a usable contest number, or None when adjacency cannot be established."""
+    try:
+        return int(draw["contest"])
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _layout_distribution(spec: dict, rows: list[list[int]]) -> dict:
@@ -304,6 +351,51 @@ def _special_distribution(key: str, draws: list[dict]) -> dict:
     result = {}
     if key == "diadesorte":
         result["months"] = {"counts": [{"month": name, "count": count} for name, count in months.most_common()], "distinct": len(months)}
+        month_rows = []
+        for draw in draws:
+            month = draw.get("month") or {}
+            number = month.get("number")
+            if isinstance(number, int) and 1 <= number <= 12:
+                month_rows.append((draw, number, month.get("name") or str(number)))
+
+        observed = Counter(number for _, number, _ in month_rows)
+        latest_contest = max((int(d.get("contest", 0)) for d in draws), default=None)
+        repeats = []
+        cut_boundaries = []
+        for index in range(len(draws) - 1):
+            newer, older = draws[index], draws[index + 1]
+            newer_contest = int(newer.get("contest", 0))
+            older_contest = int(older.get("contest", 0))
+            if newer_contest - older_contest != 1:
+                cut_boundaries.append({"newer_contest": newer.get("contest"), "older_contest": older.get("contest")})
+                continue
+            newer_month = (newer.get("month") or {}).get("number")
+            older_month = (older.get("month") or {}).get("number")
+            if isinstance(newer_month, int) and newer_month == older_month and 1 <= newer_month <= 12:
+                repeats.append({"month": newer_month, "name": (newer.get("month") or {}).get("name") or str(newer_month), "contests": [newer.get("contest"), older.get("contest")]})
+
+        latest_record_index = next((i for i, d in enumerate(draws) if int(d.get("contest", 0)) == latest_contest), None)
+        delay_rows = []
+        for number in range(1, 13):
+            latest_index = next((i for i, d in enumerate(draws) if (d.get("month") or {}).get("number") == number), None)
+            delay_rows.append({
+                "month": number,
+                "name": next((name for _, value, name in month_rows if value == number), str(number)),
+                "draws_since_last_observed": latest_index - latest_record_index if latest_index is not None and latest_record_index is not None else None,
+                "last_observed_contest": draws[latest_index].get("contest") if latest_index is not None else None,
+                "never_observed": latest_index is None,
+            })
+        result["months_repeat"] = {
+            "consecutive_repeats": repeats,
+            "repeated_pair_count": len(repeats),
+            "delays": delay_rows,
+            "observed_contests": len(draws),
+            "contests_with_month": len(month_rows),
+            "latest_contest": latest_contest,
+            "cut_boundaries": cut_boundaries,
+            "never_observed_months": [number for number in range(1, 13) if observed[number] == 0],
+            "note": "Atrasos contam registros observados desde o último registro disponível, não concursos presumidos. Repetições só comparam concursos consecutivos; lacunas são cortes e não comprovam o que ocorreu nelas. Meses ausentes do histórico são indicados como nunca observados no recorte.",
+        }
     if key == "timemania":
         gaps = []
         team_names = set(teams)
@@ -314,7 +406,7 @@ def _special_distribution(key: str, draws: list[dict]) -> dict:
         result["team_gaps"] = {"items": sorted(gaps, key=lambda row: (-row["draws_since_hit"], row["team"]))[:20]}
     if key == "maismilionaria":
         result["trevos"] = {"counts": [{"trevo": n, "count": trevos[n]} for n in range(1, 7)], "pairs": [{"trevos": list(pair), "count": count} for pair, count in trevo_pairs.most_common()]}
-        result["trevo_order"] = {"orders": [{"first": order[0], "second": order[1], "count": count} for order, count in trevo_orders.most_common()], "note": "Ordem extraída da sequência oficial quando os oito valores são informados."}
+        result["trevo_order"] = {"orders": [{"first": order[0], "second": order[1], "count": count} for order, count in trevo_orders.most_common()], "note": "Ordem extraída da sequência informada quando os oito valores são fornecidos; caso contrário, usa a ordem dos trevos informados. A origem não é verificada por esta análise."}
     if key == "supersete":
         result["columns"] = _column_frequency([d.get("numbers", []) for d in draws])
     return result

@@ -4,6 +4,13 @@ import os
 import sqlite3
 import threading
 from pathlib import Path
+from .validation import MAX_CONTEST, validate_draw
+
+# Bound work for corrupt legacy caches; budget exhaustion is an explicit error.
+MAX_SCAN_ROWS = 2048
+MAX_PAYLOAD_BYTES = 65_536
+MAX_RANGE_WIDTH = 500
+_PAYLOAD_SELECT = "CASE WHEN length(CAST(payload AS BLOB)) <= ? THEN payload ELSE NULL END AS payload"
 
 _DEFAULT_DB = (
     Path(os.getenv("TMPDIR", "/tmp")) / ".lotomaster.sqlite3"
@@ -62,32 +69,68 @@ def save_draw(draw: dict) -> None:
 def get_draw(game: str, contest: int) -> dict | None:
     initialize()
     with _connect() as conn:
-        row = conn.execute("SELECT payload FROM lottery_draws WHERE game=? AND contest=?", (game, int(contest))).fetchone()
-    return json.loads(row["payload"]) if row else None
+        row = conn.execute(f"SELECT contest, {_PAYLOAD_SELECT} FROM lottery_draws WHERE game=? AND contest=?", (MAX_PAYLOAD_BYTES, game, int(contest))).fetchone()
+    return _valid_row(game, row) if row else None
+
+
+def _valid_row(game, row):
+    """Validate legacy rows and bind their payload to the SQLite key."""
+    try:
+        if type(row["contest"]) is not int:
+            return None
+        draw = json.loads(row["payload"])
+        checked = validate_draw(game, draw, require_game=True, require_special=True)
+        if checked["contest"] != row["contest"]:
+            return None
+        return {**{k: v for k, v in draw.items() if k not in {"_latest_checked_at", "_known_latest_contest", "source", "warning"}}, **checked}
+    except (ValueError, TypeError, KeyError, OverflowError, RecursionError):
+        return None
+
+
+def latest_known_contest(game: str) -> int | None:
+    """Highest structurally valid cached contest, not evidence of freshness."""
+    draw = latest_draw(game)
+    return draw["contest"] if draw else None
 
 
 def list_draws(game: str, limit: int = 50) -> list[dict]:
+    """Return valid rows, or fail explicitly if the bounded scan is exhausted."""
     initialize()
     limit = max(1, min(int(limit), 1000))
+    result = []
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT payload FROM lottery_draws WHERE game=? ORDER BY contest DESC LIMIT ?",
-            (game, limit),
-        ).fetchall()
-    return [json.loads(row["payload"]) for row in rows]
+            f"SELECT contest, {_PAYLOAD_SELECT} FROM lottery_draws "
+            "WHERE game=? AND contest BETWEEN 1 AND ? ORDER BY contest DESC LIMIT ?",
+            (MAX_PAYLOAD_BYTES, game, MAX_CONTEST, MAX_SCAN_ROWS + 1),
+        )
+        for i, row in enumerate(rows):
+            if i == MAX_SCAN_ROWS:
+                raise RuntimeError("Limite de leitura do cache atingido; muitos registros inválidos ou incompletos.")
+            if (draw := _valid_row(game, row)) is not None:
+                result.append(draw)
+                if len(result) == limit:
+                    break
+    return result
 
 
 def list_draws_range(game: str, first_contest: int, last_contest: int) -> list[dict]:
-    """Return cached draws in an inclusive contest range, newest first."""
+    """Return valid rows from a bounded inclusive contest window."""
     initialize()
     low, high = sorted((int(first_contest), int(last_contest)))
+    if low < 1 or high > MAX_CONTEST or high - low + 1 > MAX_RANGE_WIDTH:
+        raise ValueError("Janela de concursos inválida ou excessiva.")
     with _connect() as conn:
+        # Exact indexed keys prevent malformed fractional keys from expanding
+        # the number of rows loaded within a numeric window.
+        keys = list(range(high, low - 1, -1))
+        placeholders = ",".join("?" for _ in keys)
         rows = conn.execute(
-            """SELECT payload FROM lottery_draws
-               WHERE game=? AND contest BETWEEN ? AND ? ORDER BY contest DESC""",
-            (game, low, high),
-        ).fetchall()
-    return [json.loads(row["payload"]) for row in rows]
+            f"SELECT contest, {_PAYLOAD_SELECT} FROM lottery_draws "
+            f"WHERE game=? AND contest IN ({placeholders}) ORDER BY contest DESC",
+            (MAX_PAYLOAD_BYTES, game, *keys),
+        )
+        return [draw for row in rows if (draw := _valid_row(game, row)) is not None]
 
 
 def latest_draw(game: str) -> dict | None:

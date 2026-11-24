@@ -88,7 +88,7 @@ LOTTERIES = {
     "maismilionaria": {
         "key": "maismilionaria", "name": "+Milionária", "slug": "mais-milionaria", "endpoint": "maismilionaria",
         "minimum": 1, "maximum": 50, "draw_size": 6, "pick_size": 6,
-        "min_pick": 6, "max_pick": 6, "digits": 2, "draws_per_contest": 1,
+        "min_pick": 6, "max_pick": 12, "digits": 2, "draws_per_contest": 1,
         "bonus": {"type": "trevos", "label": "Trevos da Sorte", "minimum": 2, "maximum": 6, "draw_size": 2},
         "prize_hits": [2, 3, 4, 5, 6],
         "extra_stats": [("trevos", "Frequência dos Trevos da Sorte"), ("trevo-pairs", "Combinações dos Trevos da Sorte"), ("trevo-order", "Ordem de Sorteio dos Trevos")],

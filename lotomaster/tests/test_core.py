@@ -64,9 +64,9 @@ class GeneratorTests(unittest.TestCase):
 
     def test_milionaria_generates_unique_trevos(self):
         with patch("lotomaster.engine.storage.latest_draw", return_value=None):
-            ticket = generate_tickets("maismilionaria", {"bonus": {"trevo_count": 4}, "seed": 17})[0]
-        self.assertEqual(len(ticket["bonus"]["trevos"]), 4)
-        self.assertEqual(len(set(ticket["bonus"]["trevos"])), 4)
+            ticket = generate_tickets("maismilionaria", {"bonus": {"trevo_count": 2}, "seed": 17})[0]
+        self.assertEqual(len(ticket["bonus"]["trevos"]), 2)
+        self.assertEqual(len(set(ticket["bonus"]["trevos"])), 2)
 
     def test_invalid_constraints_are_rejected(self):
         with patch("lotomaster.engine.storage.latest_draw", return_value=None):
@@ -103,6 +103,18 @@ class SimulationTests(unittest.TestCase):
         result = simulate_tickets("maismilionaria", [{"numbers": [1, 2, 3, 20, 21, 22], "bonus": {"trevos": [3, 4]}}], draw)[0]
         self.assertEqual(result["trevo_hits"], 0)
         self.assertIsNone(result["award"])
+
+    def test_milionaria_awards_official_tier_ten_with_two_numbers_and_one_trevo(self):
+        draw = {"contest": 10, "numbers": [1, 2, 3, 4, 5, 6], "trevos": [1, 2]}
+        ticket = {"numbers": [1, 2, 7, 8, 9, 10], "bonus": {"trevos": [1, 3]}}
+        result = simulate_tickets("maismilionaria", [ticket], draw)[0]
+        self.assertEqual(result["main_hits"], 2)
+        self.assertEqual(result["trevo_hits"], 1)
+        self.assertEqual(result["award"], "Faixa 10 · 2 acertos + 1 trevo")
+        no_trevo = simulate_tickets("maismilionaria", [{"numbers": ticket["numbers"], "bonus": {"trevos": [3, 4]}}], draw)[0]
+        self.assertEqual(no_trevo["main_hits"], 2)
+        self.assertEqual(no_trevo["trevo_hits"], 0)
+        self.assertIsNone(no_trevo["award"])
 
     def test_super_sete_scores_columns(self):
         draw = {"contest": 15, "numbers": [1, 2, 3, 4, 5, 6, 7]}

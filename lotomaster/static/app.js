@@ -3,6 +3,7 @@ const state = {
   catalog: [], game: 'lotofacil', page: 'overview', mode: 'fixed',
   generated: [], closureTickets: [], simulatorText: '', simulatorTickets: [], simulatorBonus: {}, simpleSimulation: null, historySimulation: null, statId: 'frequency', statsPayload: null,
   resultCache: null, resultsHistory: null, lastContests: {}, repeatedDraw: null, repeatedTickets: [],
+  closureData: null, repeatedData: null, myGames: [], myGamesFiltered: [], myGameFilters: {}, myGamesError: '',
 };
 let renderVersion = 0;
 let combinationCountRequest = 0;
@@ -21,6 +22,11 @@ function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 }
 function spec() { return state.catalog.find(item => item.key === state.game) || state.catalog[0]; }
+function probabilityEvent(item, probability) {
+  return item.key === 'diadesorte'
+    ? 'Acertar as 7 dezenas sorteadas e o Mês da Sorte'
+    : probability.event;
+}
 function padNum(n, digits=(spec()?.digits || 2)) { return String(n).padStart(digits, '0'); }
 function balls(nums, special=false, digits=(spec()?.digits || 2)) {
   if (!Array.isArray(nums) || !nums.length) return '<span class="small-note">Sem dezenas</span>';
@@ -80,7 +86,7 @@ function resultCard(draw, item=spec()) {
   if (draw.team) extras.push(`<div class="result-extras">Time do Coração: <b>${esc(draw.team)}</b></div>`);
   const awardCount = (draw.winners_by_tier||[]).reduce((sum,row)=>sum+Number(row.winners||0),0);
   return `<div class="card result-card">
-    <div class="card-head"><div><h2 class="card-title">${esc(item.name)} · concurso ${esc(draw.contest)}</h2><div class="result-meta">${esc(draw.draw_date||'Data não informada')} · ${esc(draw.source||draw.location||'Portal da CAIXA')}</div></div><span class="pill ${draw.accumulated?'pill-warm':'pill-muted'}">${draw.accumulated?'Acumulado':'Apurado'}</span></div>
+    <div class="card-head"><div><h2 class="card-title">${esc(item.name)} · concurso ${esc(draw.contest)}</h2><div class="result-meta">${esc(draw.draw_date||'Data não informada')} · ${esc(draw.source||'Origem não informada')}</div></div><span class="pill ${draw.accumulated?'pill-warm':'pill-muted'}">${draw.accumulated?'Acumulado':'Apurado'}</span></div>
     <div class="ball-row">${balls(draw.numbers,false,item.digits)}</div>
     ${extras.join('')}
     <div class="result-kpis"><span>Prêmio estimado<b>${esc(money(draw.estimated_prize))}</b></span><span>Próximo acumulado<b>${esc(money(draw.next_prize))}</b></span><span>Ganhadores em faixas<b>${esc(awardCount.toLocaleString('pt-BR'))}</b></span></div>
@@ -118,13 +124,13 @@ async function renderOverview(version=renderVersion) {
   if (version!==renderVersion || state.page!=='overview') return;
   const active = rows.find(row=>row.item.key===state.game);
   const successful = rows.filter(row=>row.data);
-  const cards = successful.map(row=>`<div class="card"><div class="card-head"><div><h3 class="card-title">${esc(row.item.name)}</h3><div class="card-subtitle">Concurso ${esc(row.data.contest)} · ${esc(row.data.draw_date||'')}</div></div><span class="pill ${row.data.accumulated?'pill-warm':''}">${row.data.accumulated?'Acumulado':'Resultado'}</span></div><div class="ball-row">${balls(row.data.numbers,false,row.item.digits)}${row.data.trevos?.length?balls(row.data.trevos,true,2):''}</div><button class="button button-quiet" data-game="${esc(row.item.key)}" data-page="results">Ver histórico</button></div>`).join('');
+  const cards = successful.map(row=>`<div class="card"><div class="card-head"><div><h3 class="card-title">${esc(row.item.name)}</h3><div class="card-subtitle">Concurso ${esc(row.data.contest)} · ${esc(row.data.draw_date||'')}${row.data.warning?` · ${esc(row.data.warning)} · cache possivelmente desatualizado`:''}</div></div><span class="pill ${row.data.accumulated?'pill-warm':''}">${row.data.accumulated?'Acumulado':'Resultado'}</span></div><div class="ball-row">${balls(row.data.numbers,false,row.item.digits)}${row.data.trevos?.length?balls(row.data.trevos,true,2):''}</div><button class="button button-quiet" data-game="${esc(row.item.key)}" data-page="results">Ver histórico</button></div>`).join('');
   const failed = rows.filter(row=>row.error);
   $('#main-content').innerHTML = `${pageHeader('Painel de concursos','Resultados e estatísticas','Consulte os últimos concursos oficiais e abra as ferramentas disponíveis para cada modalidade.',`<button class="button button-primary" data-page="generator">✦ Gerar jogos</button>`)}
     <div class="grid grid-2" style="margin-bottom:16px">${active?.data?resultCard(active.data,active.item):`<div class="card">${errorBlock(active?.error?.message||'Resultado indisponível.')}</div>`}
       <div class="grid" style="align-content:start"><div class="grid grid-2"><div class="card kpi"><div class="kpi-top"><span>Modalidades disponíveis</span><span class="kpi-icon">▦</span></div><div class="kpi-value">${state.catalog.length}</div><div class="kpi-foot">Loterias oficiais da CAIXA</div></div><div class="card kpi"><div class="kpi-top"><span>Fonte de resultados</span><span class="kpi-icon">↻</span></div><div class="kpi-value" style="font-size:16px">CAIXA</div><div class="kpi-foot">API oficial via Worker; cache local</div></div></div>
       <div class="card"><div class="card-head"><div><h2 class="card-title">Atalhos da modalidade</h2><div class="card-subtitle">Ferramentas correspondentes às páginas públicas da referência</div></div></div><div class="form-actions"><button class="button" data-page="generator">Gerador</button><button class="button" data-page="simulator">Conferir jogos</button><button class="button" data-page="results">Resultados</button><button class="button" data-page="statistics">Estatísticas</button></div></div></div>
-    </div><div class="card"><div class="card-head"><div><h2 class="card-title">Resultados recentes por modalidade</h2><div class="card-subtitle">API pública da CAIXA via Worker de leitura</div></div><span class="pill">${successful.length} de ${state.catalog.length} disponíveis</span></div><div class="grid grid-3">${cards||'<div class="empty-state">Nenhum resultado retornado.</div>'}</div>${failed.length?`<div class="small-note" style="margin-top:12px">Temporariamente indisponíveis: ${failed.map(row=>esc(row.item.name)).join(', ')}.</div>`:''}</div>
+    </div><div class="card"><div class="card-head"><div><h2 class="card-title">Resultados recentes por modalidade</h2><div class="card-subtitle">Consulta via Worker e cache; resultados podem estar desatualizados.</div></div><span class="pill">${successful.length} de ${state.catalog.length} disponíveis</span></div><div class="grid grid-3">${cards||'<div class="empty-state">Nenhum resultado retornado.</div>'}</div>${failed.length?`<div class="small-note" style="margin-top:12px">Temporariamente indisponíveis: ${failed.map(row=>esc(row.item.name)).join(', ')}.</div>`:''}</div>
     <div class="notice"><span>ⓘ</span><span><strong>Como interpretar:</strong> frequência, atraso e padrões são descrições de sorteios passados. Cada novo concurso é aleatório e independente; essas métricas não aumentam a probabilidade de um jogo ser sorteado.</span></div>`;
 }
 
@@ -139,8 +145,8 @@ function superSeteGrid() {
 function bonusFields(item) {
   if (!item.bonus) return '';
   if (item.bonus.type==='month') return `<div class="field"><label for="bonus-month">Mês da Sorte</label><select id="bonus-month"><option value="">Aleatório</option>${months.map((m,i)=>`<option value="${i+1}">${m}</option>`).join('')}</select></div>`;
-  if (item.bonus.type==='team') return `<div class="field"><label for="bonus-team">Time do Coração</label><input id="bonus-team" placeholder="Informe o time para testar" maxlength="80"><span class="field-help">A CAIXA informa o time sorteado no resultado.</span></div>`;
-  if (item.bonus.type==='trevos') return `<div class="field"><label for="trevo-count">Quantidade de trevos</label><select id="trevo-count">${Array.from({length:5},(_,i)=>`<option value="${i+2}" ${i===0?'selected':''}>${i+2} trevos</option>`).join('')}</select></div>`;
+  if (item.bonus.type==='team') return `<div class="field"><label for="bonus-team">Time do Coração</label><input id="bonus-team" placeholder="Informe o time para testar" maxlength="80"><span class="field-help">Informe o Time do Coração para gerar um jogo completo e poder conferi-lo.</span></div>`;
+  if (item.bonus.type==='trevos') return `<div class="field"><label for="trevo-count">Quantidade de trevos</label><select id="trevo-count">${Array.from({length:5},(_,index)=>index+2).map(count=>`<option value="${count}" ${count===2?'selected':''}>${count} trevos</option>`).join('')}</select><span class="field-help">A +Milionária aceita apostas de 6–12 dezenas e 2–6 trevos; cada bilhete múltiplo equivale a várias apostas simples.</span></div>`;
   return '';
 }
 function filtersFields() {
@@ -148,7 +154,10 @@ function filtersFields() {
   const controls=fields.map(([key,label])=>`<div class="field"><label for="filter-${key}-min">Mínimo ${label}</label><input id="filter-${key}-min" type="number" min="${key==='sequence'?1:0}" placeholder="Sem limite"></div><div class="field"><label for="filter-${key}-max">Máximo ${label}</label><input id="filter-${key}-max" type="number" min="${key==='sequence'?1:0}" placeholder="Sem limite"></div>`).join('');
   const grid=spec().key==='lotofacil'?['line','column'].map(key=>`<div class="field"><label for="filter-${key}-min">Mínimo por ${key==='line'?'linha':'coluna'} (em cada uma das 5)</label><input id="filter-${key}-min" type="number" min="0" max="5" placeholder="Sem limite"></div><div class="field"><label for="filter-${key}-max">Máximo por ${key==='line'?'linha':'coluna'} (em cada uma das 5)</label><input id="filter-${key}-max" type="number" min="0" max="5" placeholder="Sem limite"></div>`).join(''):'';
   const quadrants=spec().key==='lotomania'?['q1','q2','q3','q4'].map((key,index)=>`<div class="field"><label for="filter-${key}-min">Mínimo Q${index+1} (0–25)</label><input id="filter-${key}-min" type="number" min="0" max="25" placeholder="Sem limite"></div><div class="field"><label for="filter-${key}-max">Máximo Q${index+1} (0–25)</label><input id="filter-${key}-max" type="number" min="0" max="25" placeholder="Sem limite"></div>`).join('')+'<div class="field-help">Lotomania: cada quadrante é um bloco 5×5 da grade 10×10 — Q1 topo esquerdo, Q2 topo direito, Q3 inferior esquerdo e Q4 inferior direito. Filtro estrutural, sem valor preditivo.</div>':'';
-  return `<div class="card"><div class="card-head"><div><h2 class="card-title">Filtros e regras</h2><div class="card-subtitle">Critérios próprios: primos e Fibonacci positivos (zero não conta); sequência é o maior grupo consecutivo; saltos são pares vizinhos em ordem cuja diferença é maior que 1. Na Lotofácil, contagens de linha/coluna são aplicadas a cada linha/coluna da grade 5×5. Não foi demonstrada equivalência à MazuSoft.</div></div></div><div class="form-grid">${controls}${grid}${quadrants}</div><div class="field" style="margin-top:12px"><label for="generator-weights">Pesos manuais opcionais</label><input id="generator-weights" placeholder="Ex.: 1:2, 5:3"><span class="field-help">Formato dezena:peso, separados por vírgula; peso positivo. Dezenas não informadas usam peso 1. Altera a seleção, não a chance no sorteio; não equivale aos pesos da MazuSoft.</span></div></div>`;
+  return `<div class="card"><div class="card-head"><div><h2 class="card-title">Filtros e regras</h2><div class="card-subtitle">Critérios próprios: primos e Fibonacci positivos (zero não conta); sequência é o maior grupo consecutivo; saltos são pares vizinhos em ordem cuja diferença é maior que 1. Na Lotofácil, contagens de linha/coluna são aplicadas a cada linha/coluna da grade 5×5. Não foi demonstrada equivalência à MazuSoft.</div></div></div><div class="form-grid">${controls}${grid}${quadrants}</div><div class="field" style="margin-top:12px"><label for="generator-weights">Pesos manuais opcionais</label><input id="generator-weights" placeholder="Ex.: 1:2, 5:3"><span class="field-help">Formato dezena:peso, separados por vírgula; peso positivo. Dezenas não informadas usam peso 1. Altera a seleção, não a chance no sorteio; não equivale aos pesos da MazuSoft.</span></div><div class="field" style="margin-top:12px"><label><input id="generator-pareto" type="checkbox"> Aplicar filtro Pareto histórico (80%)</label><span class="field-help">Restringe a seleção às dezenas que acumulam 80% das aparições nos até 1.000 concursos mais recentes do cache local desta modalidade. Ordem: frequência decrescente, desempate por dezena crescente. É uma descrição retrospectiva, não uma previsão; precisa haver histórico no cache.</span></div></div>`;
+}
+function generatorParetoField() {
+  return `<div class="card"><div class="field"><label><input id="generator-pareto" type="checkbox"> Aplicar filtro Pareto histórico (80%)</label><span class="field-help">Restringe a seleção às dezenas que acumulam 80% das aparições nos até 1.000 concursos mais recentes do cache local desta modalidade. Ordem: frequência decrescente, desempate por dezena crescente. É uma descrição retrospectiva, não uma previsão; precisa haver histórico no cache.</span></div></div>`;
 }
 async function renderGenerator() {
   const item=spec();
@@ -157,7 +166,7 @@ async function renderGenerator() {
     <div class="notice"><span>✦</span><span>O gerador é aleatório. Frequências e filtros servem para organizar seus jogos, não para prever o resultado nem melhorar a probabilidade matemática.</span></div>
     ${item.key==='supersete'?superSeteGrid():pickGrid(item)}
     <form id="generate-form" class="card" style="margin-top:15px"><div class="card-head"><div><h2 class="card-title">Configuração do gerador</h2><div class="card-subtitle">${esc(item.name)} · ${item.draw_size} dezenas sorteadas por concurso</div></div></div><div class="form-grid"><div class="field"><label for="game-count">Quantidade de jogos</label><input id="game-count" type="number" min="1" max="100" value="1"></div>${pickOptions.length>1?`<div class="field"><label for="pick-count">Dezenas no jogo</label><select id="pick-count">${pickOptions.map(n=>`<option value="${n}" ${n===item.pick_size?'selected':''}>${n} dezenas</option>`).join('')}</select></div>`:''}${bonusFields(item)}</div><div class="form-actions"><button class="button button-primary" type="submit">✦ Gerar combinação</button><button class="button" type="button" data-page="tools">Abrir calculadora</button></div><div id="generated-output" style="margin-top:14px"></div></form>
-    ${item.key==='supersete'?'':filtersFields()}`;
+    ${item.key==='supersete'?generatorParetoField():filtersFields()}`;
 }
 function parseNumberLines(raw) {
   return raw.split(/\n+/).map(line=>line.trim()).filter(Boolean).map(line=>line.split(/[\s,;|]+/).filter(Boolean).map(Number)).filter(row=>row.every(Number.isFinite));
@@ -171,6 +180,118 @@ function parseStrictNumberLines(raw) {
     rows.push(parts.map(Number));
   }
   return rows;
+}
+const MY_GAMES_LIMIT=500;
+const MY_GAMES_SERIALIZED_CHAR_LIMIT=1_500_000;
+function myGamesStorageKey(game) { return `lotomaster.myGames.v1.${game}`; }
+function readMyGames(game) {
+  const store=globalThis.localStorage;
+  if (!store) throw new Error('O armazenamento local deste navegador não está disponível.');
+  const raw=store.getItem(myGamesStorageKey(game));
+  if (!raw) return [];
+  const items=JSON.parse(raw);
+  const itemSpec=state.catalog.find(row=>row.key===game);
+  if (!Array.isArray(items)||items.length>MY_GAMES_LIMIT||!itemSpec) throw new Error('Os dados de Meus Jogos estão inválidos; nada foi alterado.');
+  const ids=new Set();
+  for(const ticket of items) {
+    if(!ticket||ticket.game!==game||typeof ticket.id!=='string'||!ticket.id||ids.has(ticket.id)||!Array.isArray(ticket.numbers)||!Number.isSafeInteger(ticket.ticket_number)) throw new Error('Os dados de Meus Jogos estão inválidos; nada foi alterado.');
+    ids.add(ticket.id);
+    const numbers=ticket.numbers;
+    if(game==='supersete'?numbers.length!==7:numbers.length<itemSpec.min_pick||numbers.length>maxSimulationPicks(itemSpec)) throw new Error('Há um bilhete local com quantidade inválida; nada foi alterado.');
+    if(numbers.some(number=>!Number.isSafeInteger(number)||(game==='supersete'?number<0||number>9:number<itemSpec.range.minimum||number>itemSpec.range.maximum))||(game!=='supersete'&&new Set(numbers).size!==numbers.length)) throw new Error('Há dezenas inválidas em Meus Jogos; nada foi alterado.');
+    const bonus=ticket.bonus||{};
+    if(itemSpec.bonus?.type==='month'&&bonus.month!==undefined&&(!Number.isInteger(bonus.month)||bonus.month<1||bonus.month>12)) throw new Error('Há um Mês da Sorte inválido em Meus Jogos; nada foi alterado.');
+    if(itemSpec.bonus?.type==='team'&&bonus.team!==undefined&&(typeof bonus.team!=='string'||bonus.team.length>80)) throw new Error('Há um Time do Coração inválido em Meus Jogos; nada foi alterado.');
+    if(itemSpec.bonus?.type==='trevos'&&(!Array.isArray(bonus.trevos)||bonus.trevos.length<2||bonus.trevos.length>6||new Set(bonus.trevos).size!==bonus.trevos.length||bonus.trevos.some(number=>!Number.isInteger(number)||number<1||number>6))) throw new Error('Há trevos inválidos em Meus Jogos; nada foi alterado.');
+  }
+  return items;
+}
+function writeMyGames(game, items) {
+  if (!Array.isArray(items)||items.length>MY_GAMES_LIMIT) throw new Error(`Meus Jogos permite até ${MY_GAMES_LIMIT} bilhetes por modalidade.`);
+  const serialized=JSON.stringify(items);
+  if (serialized.length>MY_GAMES_SERIALIZED_CHAR_LIMIT) throw new Error('O texto dos bilhetes excede o limite local de 1.500.000 caracteres; remova alguns bilhetes e tente novamente.');
+  const store=globalThis.localStorage;
+  if (!store) throw new Error('O armazenamento local deste navegador não está disponível.');
+  store.setItem(myGamesStorageKey(game),serialized);
+}
+function parseImportBonus(item) {
+  if (item.bonus?.type==='month') {
+    const value=$('#import-month')?.value||'';
+    if (!value) return {};
+    const month=Number(value);
+    if (!Number.isInteger(month)||month<1||month>12) throw new Error('Escolha um Mês da Sorte válido.');
+    return {month};
+  }
+  if (item.bonus?.type==='team') {
+    const team=$('#import-team')?.value.trim()||'';
+    if (team.length>80) throw new Error('O Time do Coração deve ter até 80 caracteres.');
+    return team?{team}:{};
+  }
+  if (item.bonus?.type==='trevos') {
+    const rows=parseStrictNumberLines($('#import-trevos')?.value||'');
+    if (!rows||rows.length!==1||rows[0].length<2||rows[0].length>6||new Set(rows[0]).size!==rows[0].length||rows[0].some(n=>n<1||n>6)) throw new Error('A +Milionária exige de 2 a 6 trevos distintos entre 1 e 6.');
+    return {trevos:rows[0]};
+  }
+  return {};
+}
+function validateImportedTickets(raw, item, bonus={}) {
+  const rawLines=String(raw||'').split(/\n+/).map(line=>line.trim()).filter(Boolean);
+  const rows=parseStrictNumberLines(String(raw||''));
+  if (!rows||!rawLines.length||rows.length!==rawLines.length) throw new Error('Há uma ou mais linhas inválidas. Informe apenas inteiros; nenhum bilhete foi importado.');
+  if (rows.length>MY_GAMES_LIMIT) throw new Error(`Importe no máximo ${MY_GAMES_LIMIT} bilhetes por vez.`);
+  const maxPicks=maxSimulationPicks(item);
+  const tickets=rows.map((numbers,index)=>{
+    if (item.key==='supersete'?numbers.length!==7:numbers.length<item.min_pick||numbers.length>maxPicks) throw new Error(`Linha ${index+1}: ${item.key==='supersete'?'informe exatamente 7 dígitos':`informe de ${item.min_pick} a ${maxPicks} dezenas`}.`);
+    if (item.key!=='supersete'&&new Set(numbers).size!==numbers.length) throw new Error(`Linha ${index+1}: não repita dezenas.`);
+    if (numbers.some(n=>item.key==='supersete'?n<0||n>9:n<item.range.minimum||n>item.range.maximum)) throw new Error(`Linha ${index+1}: há ${item.key==='supersete'?'dígitos fora de 0–9':`dezenas fora de ${item.range.minimum}–${item.range.maximum}`}.`);
+    const ticket={game:item.key,numbers:[...numbers],ticket_number:index+1,bonus:{...bonus},source:'import'};
+    if (item.key==='supersete') ticket.columns=numbers.map(n=>[n]);
+    return ticket;
+  });
+  return tickets;
+}
+function readNumberList(raw, item, label) {
+  const rows=parseStrictNumberLines(String(raw||''));
+  if (!rows||rows.length!==1) throw new Error(`${label}: informe uma linha de dezenas inteiras distintas.`);
+  const values=rows[0];
+  if (item.key!=='supersete'&&new Set(values).size!==values.length) throw new Error(`${label}: não repita dezenas.`);
+  if (values.some(n=>item.key==='supersete'?n<0||n>9:n<item.range.minimum||n>item.range.maximum)) throw new Error(`${label}: há valores fora do intervalo da modalidade.`);
+  return values;
+}
+function parseMyGamesFilters(item) {
+  const value=(id,min,max)=>{
+    const raw=$(`#${id}`)?.value.trim()||'';
+    if (!raw) return null;
+    if (!/^\d+$/.test(raw)||!Number.isSafeInteger(Number(raw))||Number(raw)<min||Number(raw)>max) throw new Error(`${id.replaceAll('-',' ')} deve ser inteiro entre ${min} e ${max}.`);
+    return Number(raw);
+  };
+  const filters={sumMin:value('my-filter-sum-min',0,100000),sumMax:value('my-filter-sum-max',0,100000),evenMin:value('my-filter-even-min',0,100),evenMax:value('my-filter-even-max',0,100)};
+  filters.include=($('#my-filter-include')?.value.trim())?readNumberList($('#my-filter-include').value,item,'Incluir'):[];
+  filters.exclude=($('#my-filter-exclude')?.value.trim())?readNumberList($('#my-filter-exclude').value,item,'Excluir'):[];
+  if (filters.include.some(number=>filters.exclude.includes(number))) throw new Error('Uma dezena não pode estar simultaneamente incluída e excluída.');
+  const minRepeated=value('my-filter-repeat-min',0,100), maxRepeated=value('my-filter-repeat-max',0,100);
+  filters.repeatMin=minRepeated; filters.repeatMax=maxRepeated;
+  const repeatFilter=minRepeated!==null||maxRepeated!==null;
+  if (repeatFilter) {
+    const contest=value('my-filter-reference-contest',1,10_000_000);
+    const drawRaw=$('#my-filter-reference-draw')?.value.trim()||'';
+    if (contest===null||!drawRaw) throw new Error('Para filtrar repetidas, informe o concurso e as dezenas de referência. Esse dado fica somente neste navegador e não é verificado pela CAIXA.');
+    filters.referenceContest=contest; filters.referenceDraw=readNumberList(drawRaw,item,'Concurso de referência');
+  }
+  if (filters.sumMin!==null&&filters.sumMax!==null&&filters.sumMin>filters.sumMax) throw new Error('Soma mínima não pode superar a máxima.');
+  if (filters.evenMin!==null&&filters.evenMax!==null&&filters.evenMin>filters.evenMax) throw new Error('Mínimo de pares não pode superar o máximo.');
+  if (minRepeated!==null&&maxRepeated!==null&&minRepeated>maxRepeated) throw new Error('Mínimo de repetidas não pode superar o máximo.');
+  return filters;
+}
+function filterMyGames(items, filters) {
+  return items.filter(ticket=>{
+    const numbers=ticket.numbers||[], sum=numbers.reduce((total,n)=>total+n,0), even=numbers.filter(n=>n%2===0).length;
+    const repeats=filters.referenceDraw?numbers.filter(n=>filters.referenceDraw.includes(n)).length:null;
+    return (filters.sumMin===null||sum>=filters.sumMin)&&(filters.sumMax===null||sum<=filters.sumMax)
+      &&(filters.evenMin===null||even>=filters.evenMin)&&(filters.evenMax===null||even<=filters.evenMax)
+      &&filters.include.every(number=>numbers.includes(number))&&!filters.exclude.some(number=>numbers.includes(number))
+      &&(filters.repeatMin===null||repeats>=filters.repeatMin)&&(filters.repeatMax===null||repeats<=filters.repeatMax);
+  });
 }
 function lotomaniaQuadrantCounts(numbers) {
   const counts={Q1:0,Q2:0,Q3:0,Q4:0};
@@ -383,6 +504,9 @@ function resultsHistoryNavigation(history,page) {
 function renderResultsHistoryPage(item,history,page) {
   const items=historyItemsNewestFirst(page.items);
   const missing=Array.isArray(page.missing_contests)?page.missing_contests:[];
+  const provenance=page.provenance||{};
+  const sourceLabel=provenance.latest_lookup==='server_fetch'?'consulta via Worker':provenance.latest_lookup==='server_cache'?'cache do servidor':'origem da consulta não identificada';
+  const freshnessWarning=page.warning||(provenance.recently_checked===true?'':'A atualização do último concurso não foi verificada; os dados podem estar desatualizados.');
   $('#history-count').textContent=`${items.length} concursos nesta página`;
   $('#history-range').textContent=items.length?`Concursos ${page.from_contest}–${page.to_contest} · ${items.length} encontrado(s)${missing.length?` · ${missing.length} indisponível(is)`:''}`:'Nenhum concurso disponível nesta página.';
   const nav=resultsHistoryNavigation(history,page);
@@ -391,7 +515,9 @@ function renderResultsHistoryPage(item,history,page) {
   $('[data-action="results-older"]').disabled=!nav.older||history.isLoading;
   const rows=items.map(draw=>`<tr><td class="table-number">${esc(draw.contest)}</td><td>${esc(draw.draw_date||'')}</td><td>${balls(draw.numbers,false,item.digits)} ${draw.second_numbers?.length?`<div class="small-note">2º sorteio: ${balls(draw.second_numbers,false,item.digits)}</div>`:''}</td><td>${draw.trevos?.length?balls(draw.trevos,true,2):draw.month?.name?esc(draw.month.name):draw.team?esc(draw.team):'—'}</td><td>${draw.accumulated?'<span class="pill pill-warm">Acumulado</span>':'—'}</td><td>${esc(money(draw.estimated_prize))}</td></tr>`).join('');
   const gapNotice=missing.length?`<div class="notice notice-warning"><span>ⓘ</span><span>Não foi possível obter ${missing.length} concurso(s) desta página: ${missing.map(esc).join(', ')}. Tente novamente mais tarde; a ausência não é preenchida com dados inventados.</span></div>`:'';
-  $('#history-table').innerHTML=`${gapNotice}${rows?`<div class="table-wrap"><table><thead><tr><th>Concurso</th><th>Data</th><th>Dezenas sorteadas</th><th>Complemento</th><th>Status</th><th>Próximo prêmio</th></tr></thead><tbody>${rows}</tbody></table></div>`:'<div class="empty-state">Não foram retornados concursos.</div>'}`;
+  const freshnessNotice=freshnessWarning?`<div class="notice notice-warning"><span>ⓘ</span><span>${esc(freshnessWarning)} · exibindo os dados disponíveis; confirme os resultados na CAIXA.</span></div>`:'';
+  const provenanceNote=`<div class="small-note">Proveniência: ${esc(sourceLabel)}; autenticidade não verificada independentemente pelo servidor.</div>`;
+  $('#history-table').innerHTML=`${freshnessNotice}${gapNotice}${provenanceNote}${rows?`<div class="table-wrap"><table><thead><tr><th>Concurso</th><th>Data</th><th>Dezenas sorteadas</th><th>Complemento</th><th>Status</th><th>Próximo prêmio</th></tr></thead><tbody>${rows}</tbody></table></div>`:'<div class="empty-state">Não foram retornados concursos.</div>'}`;
 }
 async function loadResultsHistoryPage(version,index) {
   const item=spec(),history=state.resultsHistory;
@@ -473,6 +599,7 @@ async function loadSelectedStat() {
     if (version!==renderVersion || state.page!=='statistics' || state.game!==item.key) return;
     state.statsPayload=data;
     $('#stats-count').textContent=`${data.draws_analyzed} concursos`;
+    setNotice([data.warning, data.partial?'Amostra parcial: nem todos os concursos solicitados estão disponíveis.':''].filter(Boolean).join(' '), 'warning');
     const repeatAvailable=data.tables?.repeats?.data?.latest_comparison_available!==false;
     $('#stats-highlights').innerHTML=`<div class="stats-highlight"><div class="mini-stat"><small>Números analisados</small><b>${esc(data.draws_analyzed)}</b></div><div class="mini-stat"><small>Concurso mais recente</small><b>${esc(data.latest_contest||'—')}</b></div><div class="mini-stat"><small>Repetidas do anterior</small><b>${esc(repeatAvailable?data.repeated_from_previous:'Indisponível')}</b></div><div class="mini-stat"><small>Soma mais recente</small><b>${esc(data.sum?.latest??'—')}</b></div></div>`;
     const id=$('#stat-picker').value; state.statId=id;
@@ -482,7 +609,7 @@ async function loadSelectedStat() {
 }
 async function renderAssistant() {
   const item=spec(); const version=renderVersion;
-  $('#main-content').innerHTML=`${pageHeader('Análise exploratória · '+item.name,'Assistente analítico',`Conecte sua API pessoal para analisar resultados públicos e, se quiser, gerar uma combinação experimental.`)}${window.LotoMasterAI.configMarkup()}<div class="notice notice-warning"><span>ⓘ</span><span>A análise é retrospectiva e não prevê resultados. Concursos futuros só podem ser lidos depois de publicados pela CAIXA; a página verifica atualizações enquanto permanece aberta. O gerador uniforme permanece inalterado.</span></div><form id="ai-analysis-form" class="card"><div class="card-head"><div><h2 class="card-title">Ler resultados oficiais e analisar</h2><div class="card-subtitle">Para calcular estatísticas, o recorte passa pelo backend Lotomaster; após consentimento, ele também é enviado diretamente ao provedor escolhido.</div></div><span id="assistant-status" class="pill pill-muted">Aguardando</span></div><div class="ai-analysis-controls"><div class="field"><label for="ai-history-mode">Período histórico</label><select id="ai-history-mode"><option value="all" selected>Todo o histórico disponível (desde o concurso 1)</option><option value="300">Últimos 300 concursos</option><option value="50">Últimos 50 concursos</option></select></div><button class="button button-primary" type="submit">Analisar com minha IA</button></div><label class="ai-consent"><input id="ai-consent" type="checkbox"><span>Autorizo enviar ao provedor escolhido os resultados públicos da CAIXA e as estatísticas deste recorte para a análise solicitada.</span></label><label class="ai-partial"><input id="ai-allow-partial" type="checkbox"><span>Se alguns concursos estiverem indisponíveis, aceito uma análise parcial claramente identificada.</span></label><div class="small-note ai-progress" id="ai-progress">O histórico completo é carregado em páginas de até 100 concursos. O arquivo atualmente suporta até 5.000 concursos por análise.</div><div id="assistant-content"><div class="empty-state">Configure uma API, marque o consentimento e solicite uma análise.</div></div></form><div class="card" style="margin-top:16px"><div class="card-head"><div><h2 class="card-title">Gerador uniforme (baseline)</h2><div class="card-subtitle">Esta combinação é aleatória e independente da análise histórica; cada jogo legal conserva suas chances teóricas.</div></div></div><div class="form-actions"><button class="button button-primary" data-action="assistant-generate">Montar combinação aleatória</button></div><div id="assistant-ticket"></div></div>`;
+  $('#main-content').innerHTML=`${pageHeader('Análise exploratória · '+item.name,'Assistente analítico',`Conecte sua API pessoal para analisar resultados públicos e, se quiser, gerar uma combinação experimental.`)}${window.LotoMasterAI.configMarkup()}<div class="notice notice-warning"><span>ⓘ</span><span>A análise é retrospectiva e não prevê resultados. Concursos futuros só podem ser lidos depois de publicados pela CAIXA; a página verifica atualizações enquanto permanece aberta. O gerador uniforme permanece inalterado.</span></div><form id="ai-analysis-form" class="card"><div class="card-head"><div><h2 class="card-title">Ler resultados oficiais e analisar</h2><div class="card-subtitle">Para calcular estatísticas, o recorte passa pelo backend Lotomaster; após consentimento, ele também é enviado diretamente ao provedor escolhido.</div></div><span id="assistant-status" class="pill pill-muted">Aguardando</span></div><div class="ai-analysis-controls"><div class="field"><label for="ai-history-mode">Período histórico</label><select id="ai-history-mode"><option value="all" selected>Até os 500 concursos mais recentes</option><option value="300">Últimos 300 concursos</option><option value="50">Últimos 50 concursos</option></select></div><button class="button button-primary" type="submit">Analisar com minha IA</button></div><label class="ai-consent"><input id="ai-consent" type="checkbox"><span>Autorizo enviar ao provedor escolhido os resultados públicos da CAIXA e as estatísticas deste recorte para a análise solicitada.</span></label><label class="ai-partial"><input id="ai-allow-partial" type="checkbox"><span>Se alguns concursos estiverem indisponíveis, aceito uma análise parcial claramente identificada.</span></label><div class="small-note ai-progress" id="ai-progress">O recorte é carregado em páginas de até 100 concursos, com limite de 500 por análise. Se houver concursos anteriores, eles ficarão de fora.</div><div id="assistant-content"><div class="empty-state">Configure uma API, marque o consentimento e solicite uma análise.</div></div></form><div class="card" style="margin-top:16px"><div class="card-head"><div><h2 class="card-title">Gerador uniforme (baseline)</h2><div class="card-subtitle">Esta combinação é aleatória e independente da análise histórica; cada jogo legal conserva suas chances teóricas.</div></div></div>${item.key==='timemania'?'<div class="field"><label for="assistant-team">Time do Coração</label><input id="assistant-team" maxlength="100" required placeholder="Informe seu time"></div>':''}<div class="form-actions"><button class="button button-primary" data-action="assistant-generate">Montar combinação aleatória</button></div><div id="assistant-ticket"></div></div>`;
   if (version!==renderVersion || state.page!=='assistant') return;
   window.LotoMasterAI.bindConfigControls();
   $('#ai-consent')?.addEventListener('change', event=>{if(!event.currentTarget.checked)aiAnalysisController?.abort();});
@@ -525,59 +652,44 @@ function validateAssistantHistoryPage(page, pageLimit, seenDraws, seenMissing) {
 }
 
 async function fetchAssistantHistory(item, mode, progress, signal) {
-  if (mode!=='all') {
-    const limit=Number(mode);
-    if (![50,300].includes(limit)) throw new Error('Selecione um recorte de 50 ou 300 concursos.');
-    const byContest=new Map(); const missing=new Set(); let unreported=0; let before=null; let expectedCount=0; let pages=0; let hasMore=true;
-    while (hasMore && expectedCount<limit && pages<50) {
-      const pageLimit=Math.min(100,limit-expectedCount);
-      const cursor=before===null?'':`&before=${encodeURIComponent(before)}`;
-      const page=await api(`/${item.key}/history?limit=${pageLimit}${cursor}`,{signal});
-      const checked=validateAssistantHistoryPage(page,pageLimit,new Set(byContest.keys()),missing);
-      checked.rows.forEach(draw=>byContest.set(Number(draw.contest),draw));
-      checked.missing.forEach(contest=>missing.add(contest));
-      unreported+=checked.unreported; expectedCount+=checked.expected; pages++;
-      hasMore=page.next_before!==null&&page.next_before!==undefined;
-      if (hasMore&&checked.expected===0) throw new Error('O cursor do histórico avançou sem concursos esperados.');
-      if (hasMore) {
-        const next=Number(page.next_before);
-        if (!Number.isSafeInteger(next)||next<1||(before!==null&&next>=before)) throw new Error('O cursor do histórico retornou um valor inválido.');
-        before=next;
-      }
-      progress.textContent=`Carregando recorte da CAIXA: ${byContest.size} concursos recebidos · ${missing.size} indisponível(is)`;
-    }
-    if (hasMore&&expectedCount<limit) throw new Error('O recorte excedeu o limite local de páginas.');
-    const draws=[...byContest.values()].sort((a,b)=>Number(b.contest)-Number(a.contest));
-    const missingCount=Math.max(missing.size+unreported,expectedCount-draws.length,0);
-    const periodLabel=expectedCount<limit?`Todo o histórico disponível: ${expectedCount} concursos numerados`:`Últimos ${limit} concursos numerados`;
-    return {draws,missingCount,complete:missingCount===0&&draws.length===expectedCount,archiveComplete:false,expectedCount,periodLabel};
-  }
-  const byContest=new Map(); const missing=new Set(); let unreported=0; let expectedCount=0; let before=null; let pages=0; let hasMore=true;
-  while (hasMore && pages<50) {
+  const isRecentMode=mode!=='all';
+  const limit=isRecentMode?Number(mode):500;
+  if (!Number.isSafeInteger(limit)||![50,300,500].includes(limit)) throw new Error('Selecione 50, 300 ou até 500 concursos.');
+  const byContest=new Map(); const missing=new Set(); let unreported=0; let before=null; let expectedCount=0; let pages=0; let hasMore=true; let warning=null; let recentlyChecked=true;
+  const pageBudget=Math.ceil(limit/100);
+  while (hasMore && expectedCount<limit && pages<pageBudget) {
+    const pageLimit=Math.min(100,limit-expectedCount);
     const cursor=before===null?'':`&before=${encodeURIComponent(before)}`;
-    const page=await api(`/${item.key}/history?limit=100${cursor}`,{signal});
-    const checked=validateAssistantHistoryPage(page,100,new Set(byContest.keys()),missing);
+    const page=await api(`/${item.key}/history?limit=${pageLimit}${cursor}`,{signal});
+    if (page.warning) warning=page.warning;
+    if (pages===0 && page.provenance?.recently_checked!==true) {
+      recentlyChecked=false;
+      warning ||= 'Atualização do último concurso não foi verificada nesta consulta; o histórico pode estar desatualizado.';
+    }
+    const checked=validateAssistantHistoryPage(page,pageLimit,new Set(byContest.keys()),missing);
     checked.rows.forEach(draw=>byContest.set(Number(draw.contest),draw));
     checked.missing.forEach(contest=>missing.add(contest));
-    unreported+=checked.unreported; expectedCount+=checked.expected;
-    pages++;
-    const available=byContest.size;
-    progress.textContent=`Carregando histórico da CAIXA: ${available} concursos recebidos · página ${pages}${missing.size?` · ${missing.size} indisponível(is)`:''}`;
-    hasMore=page.next_before!==null && page.next_before!==undefined;
+    unreported+=checked.unreported; expectedCount+=checked.expected; pages++;
+    hasMore=page.next_before!==null&&page.next_before!==undefined;
     if (hasMore&&checked.expected===0) throw new Error('O cursor do histórico avançou sem concursos esperados.');
     if (hasMore) {
       const next=Number(page.next_before);
       if (!Number.isSafeInteger(next)||next<1||(before!==null&&next>=before)) throw new Error('O cursor do histórico retornou um valor inválido.');
       before=next;
     }
+    progress.textContent=`Carregando recorte da CAIXA: ${byContest.size} concursos recebidos · ${missing.size} indisponível(is)`;
   }
-  if (hasMore) throw new Error('O histórico excede o limite de 5.000 concursos desta análise. Selecione um recorte menor.');
+  if (hasMore&&expectedCount<limit) throw new Error('O recorte excedeu o limite de 500 concursos desta análise.');
   const draws=[...byContest.values()].sort((a,b)=>Number(b.contest)-Number(a.contest));
   const missingCount=Math.max(missing.size+unreported,expectedCount-draws.length,0);
+  const includesFirst=draws.some(draw=>Number(draw.contest)===1);
   const complete=missingCount===0&&draws.length===expectedCount;
-  return {draws,missingCount,complete,archiveComplete:complete,expectedCount,periodLabel:'Histórico completo disponível'};
+  const archiveComplete=complete&&includesFirst&&!warning&&recentlyChecked;
+  const periodLabel=isRecentMode
+    ? (hasMore?`Últimos ${expectedCount} concursos numerados`:`Histórico desde o concurso 1 · ${expectedCount} concursos`)
+    : (hasMore?`Recorte dos até ${limit} concursos mais recentes · histórico anterior não incluído`:`Histórico desde o concurso 1 · ${expectedCount} concursos`);
+  return {draws,warning,missingCount,complete,archiveComplete,expectedCount,periodLabel,recentlyChecked};
 }
-
 function renderAssistantAnalysis(result, item, draws, completeness, stats, probability) {
   const content=$('#assistant-content');
   const observations=(result.observations||[]).map(text=>`<li>${esc(text)}</li>`).join('');
@@ -585,7 +697,7 @@ function renderAssistantAnalysis(result, item, draws, completeness, stats, proba
   const candidateHtml=candidate?`<div class="ai-ticket"><div class="generated-ticket-head"><b>Sugestão experimental da IA · ${esc(item.name)}</b><span class="pill pill-warm">Sem vantagem demonstrada</span></div><div class="ball-row">${balls(candidate,false,item.digits)}</div><div class="small-note">${esc(result.candidate_note||'Combinação exploratória, não é previsão nem altera a probabilidade teórica.')} ${item.bonus?.type==='team'?'Escolha também o Time do Coração na conferência.':item.bonus?.type==='month'?'Escolha também o Mês da Sorte na conferência.':item.bonus?.type==='trevos'?'Escolha também os trevos na conferência.':''}</div><div class="form-actions"><button type="button" class="button" data-action="ai-use-candidate" data-numbers="${esc(JSON.stringify(candidate))}">Conferir esta sugestão</button></div></div>`:'<div class="small-note">A resposta não forneceu uma combinação válida conforme as regras oficiais; nenhuma combinação foi exibida.</div>';
   const probabilityHtml=probability?`<div class="card" style="margin-top:12px"><h3 class="card-title">Probabilidades calculadas pelo motor combinatório</h3><div class="stats-highlight"><div class="mini-stat"><small>${esc(probability.event)}</small><b>Aprox. 1 em ${esc(Number(probability.one_in).toLocaleString('pt-BR'))}</b><small>${esc(Number(probability.percent).toExponential(3))}%</small>${renderExactOutcomes(probability)}</div>${probability.any_prize?`<div class="mini-stat"><small>Qualquer categoria de prêmio</small><b>Aprox. 1 em ${esc(Number(probability.any_prize.one_in).toLocaleString('pt-BR'))}</b><small>${esc(Number(probability.any_prize.percent).toExponential(3))}%</small>${renderExactOutcomes(probability.any_prize)}</div>`:''}</div><div class="small-note">Contagem combinatória teórica do jogo-base da modalidade; o histórico não altera estas chances. A IA apenas recebe estes valores calculados, não os estima.</div></div>`:'';
   const scope=completeness.complete?completeness.periodLabel:`análise parcial · ${completeness.missingCount} concurso(s) indisponível(is)`;
-  content.innerHTML=`<div class="stats-highlight"><div class="mini-stat"><small>Concursos recebidos</small><b>${esc(draws.length.toLocaleString('pt-BR'))}</b></div><div class="mini-stat"><small>Mais recente</small><b>${esc(stats.latest_contest||'—')}</b></div><div class="mini-stat"><small>Escopo</small><b>${esc(scope)}</b></div></div>${probabilityHtml}<h3 class="card-title">Leitura da IA</h3><p class="ai-output">${esc(result.analysis||'O provedor não apresentou um resumo interpretável.')}</p>${observations?`<h3 class="card-title" style="margin-top:14px">Observações do modelo</h3><ul class="ai-observations">${observations}</ul>`:''}${candidateHtml}<div class="notice"><span>ⓘ</span><span>Frequência, atraso, vizinhança e áreas quentes/frias são descrições do histórico, não probabilidades ou previsões. Mesmo uma anomalia aparente não demonstra manipulação nem vantagem futura. ${esc(stats.disclaimer||'')}</span></div>`;
+  content.innerHTML=`${completeness.warning?`<div class="notice notice-warning">${esc(completeness.warning)} · o histórico pode estar desatualizado.</div>`:""}<div class="stats-highlight"><div class="mini-stat"><small>Concursos recebidos</small><b>${esc(draws.length.toLocaleString('pt-BR'))}</b></div><div class="mini-stat"><small>Mais recente</small><b>${esc(stats.latest_contest||'—')}</b></div><div class="mini-stat"><small>Escopo</small><b>${esc(scope)}</b></div></div>${probabilityHtml}<h3 class="card-title">Leitura da IA</h3><p class="ai-output">${esc(result.analysis||'O provedor não apresentou um resumo interpretável.')}</p>${observations?`<h3 class="card-title" style="margin-top:14px">Observações do modelo</h3><ul class="ai-observations">${observations}</ul>`:''}${candidateHtml}<div class="notice"><span>ⓘ</span><span>Frequência, atraso, vizinhança e áreas quentes/frias são descrições do histórico, não probabilidades ou previsões. Mesmo uma anomalia aparente não demonstra manipulação nem vantagem futura. ${esc(stats.disclaimer||'')}</span></div>`;
 }
 
 async function runPersonalAIAnalysis(event) {
@@ -611,7 +723,8 @@ async function runPersonalAIAnalysis(event) {
     if (!completeness.complete && !allowPartial) throw new Error(`Não foi possível obter ${completeness.missingCount} concurso(s). Marque a opção de análise parcial se desejar continuar; a IA não será chamada sem essa escolha.`);
     status.textContent='Calculando';
     progress.textContent=`Calculando estatísticas descritivas de ${completeness.draws.length.toLocaleString('pt-BR')} concursos; a seguir os dados serão enviados ao provedor selecionado.`;
-    const stats=await api(`/${item.key}/statistics/from-draws`,{method:'POST',body:JSON.stringify({draws:completeness.draws}),signal:controller.signal});
+    const drawsForStats=completeness.draws.map(({game,contest,numbers,second_numbers,trevos,ordered_numbers,month,team,special_draw})=>({game,contest,numbers,second_numbers,trevos,ordered_numbers,month,team,special_draw}));
+    const stats=await api(`/${item.key}/statistics/from-draws`,{method:'POST',body:JSON.stringify({draws:drawsForStats}),signal:controller.signal});
     requireConsent();
     if (version!==renderVersion || state.page!=='assistant' || state.game!==item.key) return;
     const probability=await api(`/${item.key}/probability`,{signal:controller.signal});
@@ -624,7 +737,7 @@ async function runPersonalAIAnalysis(event) {
     if (version!==renderVersion || state.page!=='assistant' || state.game!==item.key) return;
     renderAssistantAnalysis(result,item,completeness.draws,completeness,stats,probability);
     status.textContent='Concluída';
-    progress.textContent=`Fonte: resultados oficiais da CAIXA. ${completeness.draws.length.toLocaleString('pt-BR')} concursos enviados; janela ${completeness.draws.at(-1)?.contest||'—'}–${completeness.draws[0]?.contest||'—'}.`;
+    progress.textContent=`Fonte: histórico consultado via Worker e/ou cache; não verificado independentemente. ${completeness.warning?"Último concurso pode estar desatualizado. ":""}${completeness.draws.length.toLocaleString('pt-BR')} concursos enviados; janela ${completeness.draws.at(-1)?.contest||'—'}–${completeness.draws[0]?.contest||'—'}.`;
   } catch(error) {
     if (version!==renderVersion) return;
     if (error?.name==='AbortError') {
@@ -672,9 +785,15 @@ async function generateAssistantTicket() {
   if (!target) return;
   target.innerHTML='<div class="loading-block"><span class="spinner"></span>Gerando combinação aleatória...</div>';
   try {
-    const data=await api(`/${item.key}/generate`,{method:'POST',body:JSON.stringify({count:1})});
+    const payload={count:1};
+    if (item.key==='timemania') {
+      const team=$('#assistant-team')?.value?.trim() || '';
+      if (!team || team.length>100) throw new Error('Informe o Time do Coração (até 100 caracteres).');
+      payload.bonus={team};
+    }
+    const data=await api(`/${item.key}/generate`,{method:'POST',body:JSON.stringify(payload)});
     const ticket=data.items[0];
-    target.innerHTML=`<div class="generated-ticket"><div class="generated-ticket-head"><b>Jogo aleatório</b><span class="pill">Sem ponderação histórica</span></div>${item.key==='supersete'?`<div class="col-grid">${ticket.columns.map((values,index)=>`<div class="col-box"><strong>COLUNA ${index+1}</strong>${balls(values)}</div>`).join('')}</div>`:`<div class="ball-row">${balls(ticket.numbers,false,item.digits)}</div>`}<div class="ticket-stats">Chance combinatória teórica aproximada por jogo: 1 em ${esc(Number(ticket.probability.one_in).toLocaleString('pt-BR'))}</div><div class="small-note">${esc(data.disclaimer)}</div></div>`;
+    target.innerHTML=`<div class="generated-ticket"><div class="generated-ticket-head"><b>Jogo aleatório</b><span class="pill">Sem ponderação histórica</span></div>${item.key==='supersete'?`<div class="col-grid">${ticket.columns.map((values,index)=>`<div class="col-box"><strong>COLUNA ${index+1}</strong>${balls(values)}</div>`).join('')}</div>`:`<div class="ball-row">${balls(ticket.numbers,false,item.digits)}</div>`}${ticket.bonus?.team?`<div class="ticket-stats">Time do Coração: ${esc(ticket.bonus.team)}</div>`:''}<div class="ticket-stats">${esc(probabilityEvent(item,ticket.probability))}: 1 em ${esc(Number(ticket.probability.one_in).toLocaleString('pt-BR'))}</div><div class="small-note">${esc(data.disclaimer)}</div></div>`;
   } catch(error) { target.innerHTML=errorBlock(error.message); }
 }
 function invalidateHistoryNumberSearch(message='Resultado anterior desatualizado; pesquise novamente.') {
@@ -739,13 +858,103 @@ async function runHistoryNumberSearch(event) {
   }
 }
 
+function myGamesListHtml(item) {
+  if(state.myGamesError) return `<div class="error-box">${esc(state.myGamesError)}</div>`;
+  const all=state.myGames||[], shown=state.myGamesFiltered||all;
+  const rows=shown.slice(0,100).map(ticket=>{
+    const numbers=item.key==='supersete'?(ticket.numbers||[]).join(' '):(ticket.numbers||[]).map(n=>padNum(n,item.digits)).join(' ');
+    const bonus=ticket.bonus?.trevos?.length?` · trevos ${ticket.bonus.trevos.join(' ')}`:ticket.bonus?.month?` · mês ${ticket.bonus.month}`:ticket.bonus?.team?` · ${ticket.bonus.team}`:'';
+    return `<div class="draw-row"><div class="draw-row-main"><div class="draw-title">Jogo ${esc(ticket.ticket_number)}${esc(bonus)}</div><div class="draw-caption">${esc(numbers)}</div></div><div class="form-actions"><button type="button" class="button" data-action="my-game-use" data-game-id="${esc(ticket.id)}">Abrir no conferidor</button><button type="button" class="button" data-action="my-game-remove" data-game-id="${esc(ticket.id)}">Remover</button></div></div>`;
+  }).join('');
+  return `<div class="card-head"><div><h3 class="card-title">${esc(shown.length)} exibidos de ${esc(all.length)} jogos salvos</h3><div class="card-subtitle">A filtragem só altera esta lista visual. Os bilhetes originais ficam intactos no localStorage deste navegador.</div></div></div>${rows||'<div class="empty-state">Nenhum jogo corresponde aos filtros, ou ainda não há jogos importados.</div>'}${shown.length>100?'<div class="small-note">Exibindo 100 itens. Os filtros foram aplicados à lista completa.</div>':''}<div class="small-note">Os jogos não são enviados ao servidor até você abrir um jogo no conferidor e enviar uma solicitação.</div>`;
+}
+function myGamesSection(item) {
+  return `<section class="card" id="my-games-section" style="margin-top:16px"><div class="card-head"><div><h2 class="card-title">Meus Jogos · somente neste navegador</h2><div class="card-subtitle">Importe, filtre e gerencie bilhetes localmente; nada é enviado por salvar ou filtrar.</div></div><span class="pill">Até ${MY_GAMES_LIMIT} por modalidade</span></div><form id="my-games-filter-form"><div class="form-grid"><div class="field"><label for="my-filter-sum-min">Soma mínima</label><input id="my-filter-sum-min" type="number" min="0" placeholder="Sem limite"></div><div class="field"><label for="my-filter-sum-max">Soma máxima</label><input id="my-filter-sum-max" type="number" min="0" placeholder="Sem limite"></div><div class="field"><label for="my-filter-even-min">Pares mínimos</label><input id="my-filter-even-min" type="number" min="0" placeholder="Sem limite"></div><div class="field"><label for="my-filter-even-max">Pares máximos</label><input id="my-filter-even-max" type="number" min="0" placeholder="Sem limite"></div><div class="field"><label for="my-filter-include">Incluir todas estas dezenas (opcional)</label><input id="my-filter-include" placeholder="Ex.: 01 05"></div><div class="field"><label for="my-filter-exclude">Excluir jogos com estas dezenas</label><input id="my-filter-exclude" placeholder="Ex.: 10 20"></div><div class="field"><label for="my-filter-repeat-min">Repetidas mínimas</label><input id="my-filter-repeat-min" type="number" min="0" placeholder="Sem limite"></div><div class="field"><label for="my-filter-repeat-max">Repetidas máximas</label><input id="my-filter-repeat-max" type="number" min="0" placeholder="Sem limite"></div><div class="field"><label for="my-filter-reference-contest">Concurso de referência (para repetidas)</label><input id="my-filter-reference-contest" type="number" min="1" step="1" placeholder="Informe o concurso"></div><div class="field"><label for="my-filter-reference-draw">Dezenas do concurso de referência</label><input id="my-filter-reference-draw" placeholder="Informe junto ao concurso"></div></div><div class="form-actions"><button type="submit" class="button button-primary">Aplicar filtros localmente</button><button type="button" class="button" data-action="my-games-clear-filters">Limpar filtros</button></div><div id="my-games-filter-status" class="small-note" role="status"></div></form><div id="my-games-list" style="margin-top:12px">${myGamesListHtml(item)}</div></section>`;
+}
+function updateMyGamesList() {
+  const item=spec(), target=$('#my-games-list');
+  if(target) target.innerHTML=myGamesListHtml(item);
+}
+async function handleImportGames(event) {
+  event.preventDefault();
+  const item=spec(), status=$('#import-status');
+  try {
+    const bonus=parseImportBonus(item), imported=validateImportedTickets($('#import-text').value,item,bonus);
+    const existing=readMyGames(item.key);
+    if(existing.length+imported.length>MY_GAMES_LIMIT) throw new Error(`Meus Jogos permite até ${MY_GAMES_LIMIT} bilhetes por modalidade; nada foi salvo.`);
+    const timestamp=new Date().toISOString();
+    const additions=imported.map((ticket,index)=>({...ticket,id:`g${Date.now()}-${Math.random().toString(36).slice(2)}-${index}`,ticket_number:existing.length+index+1,saved_at:timestamp}));
+    const updated=[...existing,...additions];
+    writeMyGames(item.key,updated);
+    state.myGames=updated; state.myGamesFiltered=updated; state.myGamesError='';
+    if(status) status.textContent=`${additions.length} jogo(s) validados e salvos apenas neste navegador.`;
+    updateMyGamesList(); toast(`${additions.length} jogo(s) salvos em Meus Jogos`);
+  } catch(error) {
+    if(status) status.textContent=`Importação não concluída: ${error.message}`;
+  }
+}
+function prepareImportForSimulator() {
+  const item=spec();
+  try {
+    const bonus=parseImportBonus(item), tickets=validateImportedTickets($('#import-text').value,item,bonus);
+    state.simulatorTickets=tickets.map((ticket,index)=>({...ticket,ticket_number:index+1}));
+    state.simulatorText=state.simulatorTickets.map(ticket=>item.key==='supersete'?ticket.numbers.join(' '):ticket.numbers.map(n=>padNum(n,item.digits)).join(' ')).join('\n');
+    state.simulatorBonus=commonTicketBonus(state.simulatorTickets); state.page='simulator'; render();
+  } catch(error) { if($('#import-status'))$('#import-status').textContent=`Importação não concluída: ${error.message}`; }
+}
+function applyMyGamesFilters(event) {
+  event.preventDefault();
+  const status=$('#my-games-filter-status');
+  try {
+    const filters=parseMyGamesFilters(spec());
+    state.myGameFilters=filters; state.myGamesFiltered=filterMyGames(state.myGames||[],filters);
+    if(status) status.textContent=`Filtros aplicados somente à lista local: ${state.myGamesFiltered.length} de ${(state.myGames||[]).length} jogos.`;
+    updateMyGamesList();
+  } catch(error) { if(status)status.textContent=`Filtros não aplicados: ${error.message}`; }
+}
+function clearMyGamesFilters() {
+  const form=$('#my-games-filter-form'); form?.reset();
+  state.myGameFilters={}; state.myGamesFiltered=state.myGames||[];
+  if($('#my-games-filter-status'))$('#my-games-filter-status').textContent='Filtros limpos; todos os jogos locais são exibidos.';
+  updateMyGamesList();
+}
+function removeMyGame(id) {
+  const item=spec(), updated=(state.myGames||[]).filter(ticket=>ticket.id!==id);
+  try { writeMyGames(item.key,updated); state.myGames=updated; state.myGamesFiltered=filterMyGames(updated,state.myGameFilters||{}); state.myGamesError=''; updateMyGamesList(); }
+  catch(error) { toast(`Não foi possível atualizar o armazenamento local: ${error.message}`); }
+}
+function useMyGame(id) {
+  const item=spec(), ticket=(state.myGames||[]).find(entry=>entry.id===id);
+  if(!ticket) {toast('Jogo local não encontrado.');return;}
+  state.simulatorTickets=[{...ticket,numbers:[...ticket.numbers],bonus:{...(ticket.bonus||{})},columns:ticket.columns?.map(column=>[...column])}];
+  state.simulatorText=item.key==='supersete'?ticket.numbers.join(' '):ticket.numbers.map(n=>padNum(n,item.digits)).join(' ');
+  state.simulatorBonus=commonTicketBonus(state.simulatorTickets); state.page='simulator'; render();
+}
+function changeClosureView(type, view) {
+  if(!['all','approved'].includes(view)) return;
+  const response=type==='closure'?state.closureData:state.repeatedData;
+  if(!response) return;
+  if(type==='closure') state.closureView=view; else state.repeatedView=view;
+  const entries=response.items||[];
+  const visible=view==='approved'?entries.filter(entry=>entry.approved):entries;
+  const offset=Number(response.offset||0);
+  const tickets=visible.map(entry=>({numbers:entry.numbers,ticket_number:offset+entries.indexOf(entry)+1,bonus:{}}));
+  if(type==='closure') state.closureTickets=tickets; else state.repeatedTickets=tickets;
+  const target=type==='closure'?$('#closure-output'):$('#repeated-output');
+  if(target) target.innerHTML=closureOutputHtml(type,response,spec());
+}
+
 async function renderTools() {
   const item=spec(); const version=renderVersion;
+  state.myGameFilters={}; state.closureData=null; state.repeatedData=null;
+  state.closureRequest=null; state.repeatedRequest=null; state.closureTickets=[]; state.repeatedTickets=[];
   let tools=[];
   try { tools=(await api(`/${item.key}/tools`)).tools; } catch(_) {}
   if (version!==renderVersion || state.page!=='tools' || state.game!==item.key) return;
+  try { state.myGames=readMyGames(item.key); state.myGamesFiltered=state.myGames; state.myGamesError=''; }
+  catch(error) { state.myGames=[]; state.myGamesFiltered=[]; state.myGamesError=error.message; }
   const toolCards=tools.map(tool=>`<div class="card tool-card"><div><div class="tool-icon">${tool.id==='probability'?'∑':tool.id==='export'?'↓':tool.id==='closures'?'▧':'⌘'}</div><h3 class="card-title" style="margin-top:10px">${esc(tool.name)}</h3><p>${tool.available?'Disponível nesta versão.':esc(tool.note||'')}</p>${tool.id==='quadrants'&&tool.available?'<button type="button" class="button button-primary" data-page="generator" style="margin-top:10px">Abrir gerador por quadrantes</button>':''}</div><span class="pill ${tool.available?'':'pill-muted'}">${tool.available?'Disponível':'Em desenvolvimento'}</span></div>`).join('');
-  $('#main-content').innerHTML=`${pageHeader('Recursos · '+item.name,'Ferramentas adicionais',`Recursos públicos de apoio a jogos e consultas de ${item.name}.`)}<div class="grid grid-3">${toolCards}</div><div class="grid grid-2" style="margin-top:16px"><form class="card" id="probability-form"><div class="card-head"><div><h2 class="card-title">Calculadora de probabilidades</h2><div class="card-subtitle">Combinações teóricas para a quantidade de dezenas escolhida</div></div></div><div class="form-grid"><div class="field"><label for="prob-picks">Dezenas selecionadas</label><input id="prob-picks" type="number" min="${item.min_pick}" max="${item.max_pick}" value="${item.pick_size}"></div>${item.bonus?.type==='trevos'?'<div class="field"><label for="prob-trevos">Trevos selecionados</label><select id="prob-trevos">'+Array.from({length:5},(_,i)=>`<option value="${i+2}">${i+2}</option>`).join('')+'</select></div>':''}</div><div class="form-actions"><button class="button button-primary" type="submit">Calcular</button></div><div id="prob-result" style="margin-top:12px"></div></form><form class="card" id="import-form"><div class="card-head"><div><h2 class="card-title">Importar jogos por texto</h2><div class="card-subtitle">Cole uma combinação por linha para enviar ao conferidor.</div></div></div><div class="field"><label for="import-text">Jogos</label><textarea id="import-text" placeholder="01 05 12 ..."></textarea></div><div class="form-actions"><button type="submit" class="button button-primary">Preparar conferência</button></div></form></div><div class="notice notice-warning"><span>ⓘ</span><span>Desdobramentos exaustivos não replicam fechamentos proprietários nem garantem premiação. A inspeção de recursos públicos é parcial e não garante paridade com áreas ou funções não públicas da referência.</span></div>`;
+  $('#main-content').innerHTML=`${pageHeader('Recursos · '+item.name,'Ferramentas adicionais',`Recursos públicos de apoio a jogos e consultas de ${item.name}.`)}<div class="grid grid-3">${toolCards}</div><div class="grid grid-2" style="margin-top:16px"><form class="card" id="probability-form"><div class="card-head"><div><h2 class="card-title">Calculadora de probabilidades</h2><div class="card-subtitle">Combinações teóricas para a quantidade de dezenas escolhida</div></div></div><div class="form-grid"><div class="field"><label for="prob-picks">Dezenas selecionadas</label><input id="prob-picks" type="number" min="${item.min_pick}" max="${item.max_pick}" value="${item.pick_size}"></div>${item.bonus?.type==='trevos'?'<div class="field"><label for="prob-trevos">Trevos selecionados</label><select id="prob-trevos">'+Array.from({length:5},(_,i)=>`<option value="${i+2}">${i+2}</option>`).join('')+'</select></div>':''}</div><div class="form-actions"><button class="button button-primary" type="submit">Calcular</button></div><div id="prob-result" style="margin-top:12px"></div></form><form class="card" id="import-form"><div class="card-head"><div><h2 class="card-title">Importar jogos por texto</h2><div class="card-subtitle">Valida todas as linhas antes de salvar; linhas inválidas não são omitidas.</div></div></div><div class="field"><label for="import-text">Jogos (um por linha)</label><textarea id="import-text" placeholder="01 05 12 ..."></textarea></div><div class="form-grid" style="margin-top:10px">${item.bonus?.type==='month'?`<div class="field"><label for="import-month">Mês da Sorte (opcional)</label><select id="import-month"><option value="">Não informado</option>${months.map((month,index)=>`<option value="${index+1}">${month}</option>`).join('')}</select></div>`:''}${item.bonus?.type==='team'?'<div class="field"><label for="import-team">Time do Coração (opcional)</label><input id="import-team" maxlength="80" placeholder="Nome do time"></div>':''}${item.bonus?.type==='trevos'?'<div class="field"><label for="import-trevos">Trevos da Sorte (obrigatório)</label><input id="import-trevos" placeholder="Ex.: 2 5"><span class="field-help">Informe de 2 a 6 trevos distintos entre 1 e 6.</span></div>':''}</div><div class="form-actions"><button type="submit" class="button button-primary">Validar e salvar em Meus Jogos</button><button type="button" class="button" data-action="import-prepare-simulator">Usar no conferidor sem salvar</button></div><div id="import-status" class="small-note" role="status"></div></form></div>${myGamesSection(item)}<div class="notice notice-warning"><span>ⓘ</span><span>Desdobramentos exaustivos não replicam fechamentos proprietários nem garantem premiação. A inspeção de recursos públicos é parcial e não garante paridade com áreas ou funções não públicas da referência.</span></div>`;
   if (item.key==='supersete') {
     $('#prob-picks')?.closest('.field')?.remove();
     $('#probability-form .form-grid')?.insertAdjacentHTML('beforeend',Array.from({length:7},(_,index)=>`<div class="field"><label for="prob-column-${index+1}">Opções na coluna ${index+1}</label><select id="prob-column-${index+1}">${Array.from({length:10},(_,value)=>`<option value="${value+1}">${value+1} dígito(s)</option>`).join('')}</select></div>`).join(''));
@@ -753,7 +962,7 @@ async function renderTools() {
   $('#prob-result')?.setAttribute('role','status');
   $('#prob-result')?.setAttribute('aria-live','polite');
   if (tools.find(tool=>tool.id==='closures')?.available) {
-    $('#main-content').insertAdjacentHTML('beforeend', `<form class="card" id="closure-form" style="margin-top:16px"><div class="card-head"><div><h2 class="card-title">Desdobramento exaustivo limitado</h2><div class="card-subtitle">Gera todas as combinações do tamanho selecionado dentro do conjunto informado, incluindo as fixas. Não salva jogos.</div></div></div><div class="field"><label for="closure-pool">Conjunto de dezenas</label><textarea id="closure-pool" placeholder="Ex.: 01 02 03 04 05 06 07" required></textarea></div><div class="form-grid" style="margin-top:10px"><div class="field"><label for="closure-fixed">Dezenas fixas (opcional)</label><input id="closure-fixed" placeholder="Ex.: 01 02"></div><div class="field"><label for="closure-picks">Dezenas por jogo</label><input id="closure-picks" type="number" min="${item.min_pick}" max="${item.max_pick}" step="1" value="${item.pick_size}" required></div></div><div class="form-actions"><button class="button button-primary" type="submit">Gerar desdobramento</button></div><div id="closure-output" style="margin-top:12px"></div></form>`);
+    $('#main-content').insertAdjacentHTML('beforeend', `<form class="card" id="closure-form" style="margin-top:16px"><div class="card-head"><div><h2 class="card-title">Desdobramento exaustivo paginado</h2><div class="card-subtitle">Percorra o conjunto completo em páginas de até 1.000 combinações. Cada jogo recebe diagnóstico dos filtros; nada é salvo nem enviado automaticamente.</div></div></div><div class="field"><label for="closure-pool">Conjunto de dezenas</label><textarea id="closure-pool" placeholder="Ex.: 01 02 03 04 05 06 07" required></textarea></div><div class="form-grid" style="margin-top:10px"><div class="field"><label for="closure-fixed">Dezenas fixas (opcional)</label><input id="closure-fixed" placeholder="Ex.: 01 02"></div><div class="field"><label for="closure-picks">Dezenas por jogo</label><input id="closure-picks" type="number" min="${item.min_pick}" max="${item.max_pick}" step="1" value="${item.pick_size}" required></div></div>${closureFilterFields(item,'closure')}<div class="form-actions"><button class="button button-primary" type="submit">Gerar primeira página</button></div><div id="closure-output" style="margin-top:12px"></div></form>`);
     $('#closure-form').addEventListener('submit',handleClosure);
   }
   if (item.key==='lotofacil') {
@@ -761,7 +970,7 @@ async function renderTools() {
     $('#history-number-search-form').addEventListener('submit',runHistoryNumberSearch);
     ['#history-number-search-numbers','#history-number-search-mode','#history-number-search-criterion'].forEach(selector=>$(selector).addEventListener('input',()=>invalidateHistoryNumberSearch()));
     ['#history-number-search-mode','#history-number-search-criterion'].forEach(selector=>$(selector).addEventListener('change',()=>invalidateHistoryNumberSearch()));
-    $('#main-content').insertAdjacentHTML('beforeend', `<form class="card" id="repeated-form" style="margin-top:16px"><div class="card-head"><div><h2 class="card-title">Desdobramento exaustivo de repetidas · Lotofácil</h2><div class="card-subtitle" id="repeated-previous">Consultando o último resultado…</div></div><span class="pill pill-muted">Entrada explícita · não salva</span></div><div id="repeated-picker" class="field-help">Carregando dezenas do último concurso…</div><div class="form-actions"><button type="submit" class="button button-primary" id="repeated-submit" disabled>Gerar todas as combinações</button></div><div id="repeated-output" style="margin-top:12px"></div><div class="small-note">Escolha de 6 a 12 dezenas que ocorreram no resultado anterior. Cada jogo inclui todas as dezenas selecionadas e completa 15 dezenas entre as ausentes. Não é previsão nem garantia de prêmio.</div></form>`);
+    $('#main-content').insertAdjacentHTML('beforeend', `<form class="card" id="repeated-form" style="margin-top:16px"><div class="card-head"><div><h2 class="card-title">Desdobramento de repetidas · Lotofácil</h2><div class="card-subtitle" id="repeated-previous">Consultando o último resultado…</div></div><span class="pill pill-muted">Entrada explícita · não salva</span></div><div id="repeated-picker" class="field-help">Carregando dezenas do último concurso…</div>${closureFilterFields(item,'repeated')}<div class="form-actions"><button type="submit" class="button button-primary" id="repeated-submit" disabled>Gerar página e diagnósticos</button></div><div id="repeated-output" style="margin-top:12px"></div><div class="small-note">Escolha de 6 a 12 dezenas que ocorreram no resultado anterior. Cada jogo inclui todas as dezenas selecionadas e completa 15 dezenas entre as ausentes. Para filtro de repetidas, a referência exibida é explicitamente informada; critérios locais não são previsão nem garantia de prêmio.</div></form>`);
     loadRepeatedPrevious(version,item.key);
     $('#repeated-form').addEventListener('submit',handleRepeatedClosure);
     $('#main-content').insertAdjacentHTML('beforeend', `<form class="card" id="combination-count-form" style="margin-top:16px"><div class="card-head"><div><h2 class="card-title">Contar combinações com fixas e removidas</h2><div class="card-subtitle">Lotofácil: conta as combinações sem gerar ou salvar jogos.</div></div></div><div class="form-grid"><div class="field"><label for="combination-picks">Dezenas por jogo</label><input id="combination-picks" type="number" min="15" max="20" step="1" value="15" required></div><div class="field"><label for="combination-fixed">Quantidade de fixas</label><input id="combination-fixed" type="number" min="0" max="20" step="1" value="0" required></div><div class="field"><label for="combination-removed">Quantidade removida</label><input id="combination-removed" type="number" min="0" max="10" step="1" value="0" required></div></div><div class="form-actions"><button type="submit" class="button button-primary">Contar combinações</button></div><div id="combination-count-result" role="status" aria-live="polite" style="margin-top:12px"></div><div class="small-note">Esta é uma contagem, não uma probabilidade de prêmio. Fixar ou remover dezenas não garante que as escolhas estarão corretas no sorteio.</div></form>`);
@@ -769,7 +978,8 @@ async function renderTools() {
     ['#combination-picks','#combination-fixed','#combination-removed'].forEach(selector=>$(selector).addEventListener('input',markCombinationCountStale));
   }
   $('#probability-form').addEventListener('submit',calculateProbability);
-    $('#import-form').addEventListener('submit',e=>{e.preventDefault();state.simulatorText=$('#import-text').value;state.simulatorTickets=[];state.simulatorBonus={};state.page='simulator';render();});
+    $('#import-form').addEventListener('submit',handleImportGames);
+    $('#my-games-filter-form').addEventListener('submit',applyMyGamesFilters);
 }
 async function calculateCombinationCount(event) {
   event.preventDefault();
@@ -799,9 +1009,77 @@ async function loadRepeatedPrevious(version, game) {
     if (!draw||!Number.isInteger(Number(draw.contest))||!Array.isArray(draw.numbers)||draw.numbers.length!==15||new Set(draw.numbers).size!==15) throw new Error('O último resultado não contém 15 dezenas válidas.');
     state.repeatedDraw=draw; state.repeatedTickets=[];
     $('#repeated-previous').textContent=`Resultado anterior · concurso ${draw.contest}`;
+    if($('#repeated-reference-contest')) $('#repeated-reference-contest').value=String(draw.contest);
     $('#repeated-picker').innerHTML=draw.numbers.slice().sort((a,b)=>a-b).map(n=>`<label style="display:inline-flex;align-items:center;gap:5px;margin:6px 10px 0 0"><input type="checkbox" name="repeated-number" value="${n}">${padNum(n,2)}</label>`).join('')+'<div class="field-help">Selecione exatamente de 6 a 12 dezenas.</div>';
     $('#repeated-submit').disabled=false;
   } catch(error) { if(version===renderVersion&&state.page==='tools'&&state.game===game) $('#repeated-output').innerHTML=errorBlock(error.message); }
+}
+function closureFilterFields(item, prefix) {
+  const keys=[['sum','Soma'],['even','Pares'],['repeat','Repetidas do concurso de referência'],['prime','Primos'],['fibonacci','Fibonacci'],['sequence','Maior sequência'],['jumps','Saltos']];
+  if(item.key==='lotofacil') keys.push(['line','Mínimo/máximo por linha (cada uma das 5)'],['column','Mínimo/máximo por coluna (cada uma das 5)']);
+  if(item.key==='lotomania') for(let q=1;q<=4;q++) keys.push([`q${q}`,`Contagem Q${q}`]);
+  const inputs=keys.map(([key,label])=>`<div class="field"><label for="${prefix}-filter-${key}-min">Mínimo ${esc(label)}</label><input id="${prefix}-filter-${key}-min" type="number" placeholder="Sem limite"></div><div class="field"><label for="${prefix}-filter-${key}-max">Máximo ${esc(label)}</label><input id="${prefix}-filter-${key}-max" type="number" placeholder="Sem limite"></div>`).join('');
+  const reference=keys.some(([key])=>key==='repeat')?`<div class="field"><label for="${prefix}-reference-contest">Concurso de referência (obrigatório para repetidas)</label><input id="${prefix}-reference-contest" type="number" min="1" step="1" placeholder="Informe o concurso"><span class="field-help">Repetidas serão calculadas contra este concurso específico, nunca contra um resultado implícito.</span></div>`:'';
+  return `<div class="card" style="margin-top:12px"><div class="card-head"><div><h3 class="card-title">Filtros e diagnósticos</h3><div class="card-subtitle">Cada combinação mostrará todos os motivos locais de aprovação ou reprovação.</div></div></div><div class="form-grid">${inputs}${reference}<div class="field"><label for="${prefix}-page-size">Combinações por página</label><select id="${prefix}-page-size"><option value="100">100</option><option value="250">250</option><option value="500">500</option><option value="1000" selected>1.000</option></select></div></div></div>`;
+}
+function readClosureRequest(prefix) {
+  const filters={};
+  const keyMap={sum:'sum',even:'even',repeat:'repeated',prime:'prime',fibonacci:'fibonacci',sequence:'sequence',jumps:'jumps',line:'line',column:'column',q1:'q1',q2:'q2',q3:'q3',q4:'q4'};
+  for(const [uiKey,apiKey] of Object.entries(keyMap)) for(const bound of ['min','max']) {
+    const value=$(`#${prefix}-filter-${uiKey}-${bound}`)?.value.trim()||'';
+    if(value) {
+      if(!/^\d+$/.test(value)||!Number.isSafeInteger(Number(value))) throw new Error(`O filtro ${bound} ${uiKey} deve ser um inteiro não negativo.`);
+      filters[`${bound}_${apiKey}`]=Number(value);
+    }
+  }
+  const repeatFilter=filters.min_repeated!==undefined||filters.max_repeated!==undefined;
+  const referenceText=$(`#${prefix}-reference-contest`)?.value.trim()||'';
+  if(repeatFilter&&(!/^\d+$/.test(referenceText)||!Number.isSafeInteger(Number(referenceText))||Number(referenceText)<1)) throw new Error('Filtros de repetidas exigem um número de concurso de referência explícito.');
+  const pageSize=Number($(`#${prefix}-page-size`)?.value||1000);
+  if(![100,250,500,1000].includes(pageSize)) throw new Error('Selecione um tamanho de página válido.');
+  return {filters,reference_contest:repeatFilter?Number(referenceText):null,page_size:pageSize};
+}
+function closureGamesText(items,item) { return items.map(entry=>entry.numbers.map(n=>padNum(n,item.digits)).join(' ')).join('\n'); }
+function closureOutputHtml(type,response,item) {
+  const view=type==='closure'?(state.closureView||'all'):(state.repeatedView||'all');
+  const items=Array.isArray(response.items)?response.items:(response.games||[]).map(numbers=>({numbers,approved:true,reasons:[]}));
+  const visible=view==='approved'?items.filter(entry=>entry.approved):items;
+  const offset=Number(response.offset||0), pageSize=Number(response.page_size||items.length||1);
+  const pageNumber=Math.floor(offset/pageSize)+1;
+  const diagnostics=items.map((entry,index)=>`<tr><td>${esc(offset+index+1)}</td><td>${esc(entry.numbers.map(n=>padNum(n,item.digits)).join(' '))}</td><td>${entry.approved?'Aprovado':'Reprovado'}</td><td>${entry.reasons?.length?esc(entry.reasons.join(' · ')):'Todos os filtros atendidos'}</td></tr>`).join('');
+  const nav=`<div class="form-actions"><button type="button" class="button" data-action="${type}-prev" ${offset<=0?'disabled':''}>Página anterior</button><span class="small-note">Página ${esc(pageNumber)} · ${esc(offset+1)}–${esc(offset+items.length)} de ${esc(response.candidate_count??response.game_count)} combinações</span><button type="button" class="button" data-action="${type}-next" ${response.next_offset===null?'disabled':''}>Próxima página</button></div>`;
+  const viewControl=`<div class="form-actions"><label for="${type}-view">Exibir</label><select id="${type}-view"><option value="all" ${view==='all'?'selected':''}>Todos</option><option value="approved" ${view==='approved'?'selected':''}>Somente aprovados</option></select><span class="pill">${visible.length} exibidos · ${Number(response.approved_count||0)} aprovados nesta página</span></div>`;
+  const send=visible.length&&visible.length<=500?`<div class="form-actions"><button type="button" class="button button-primary" data-action="test-${type}">Preparar conferência dos jogos exibidos</button></div>`:`<div class="small-note">${visible.length?`O conferidor aceita até 500 jogos por envio; reduza o tamanho da página ou use “Somente aprovados”.`:'Nenhum jogo corresponde à seleção de exibição.'} Nenhum jogo foi enviado.</div>`;
+  const reference=response.reference_contest?` · referência do concurso ${esc(response.reference_contest)}`:'';
+  return `<div class="stats-highlight"><div class="mini-stat"><small>Combinações no fechamento</small><b>${esc(Number(response.candidate_count??response.game_count).toLocaleString('pt-BR'))}</b></div><div class="mini-stat"><small>Candidatas nesta página</small><b>${esc(items.length)}</b></div><div class="mini-stat"><small>Aprovadas nesta página</small><b>${esc(Number(response.approved_count||0))}</b></div></div><p class="small-note">${esc(response.coverage||response.disclaimer||'Enumeração local, sem garantia de prêmio.')}${reference}</p>${nav}${viewControl}${visible.length?`<div class="field"><label for="${type}-games">Jogos exibidos (copie para guardar)</label><textarea id="${type}-games" rows="8" readonly>${esc(closureGamesText(visible,item))}</textarea></div>`:''}${send}<details class="small-note"><summary>Diagnóstico completo de cada combinação (${items.length})</summary><div class="table-wrap"><table><thead><tr><th>#</th><th>Jogo</th><th>Status</th><th>Motivos</th></tr></thead><tbody>${diagnostics}</tbody></table></div></details>`;
+}
+async function loadClosurePage(offset) {
+  const item=spec(), version=renderVersion, target=$('#closure-output');
+  if(!state.closureRequest) return;
+  target.innerHTML='<div class="loading-block"><span class="spinner"></span>Calculando página e diagnósticos…</div>';
+  try {
+    const response=await api(`/${item.key}/closures/exhaustive`,{method:'POST',body:JSON.stringify({...state.closureRequest,offset})});
+    if(version!==renderVersion||state.page!=='tools'||state.game!==item.key) return;
+    if(!Array.isArray(response.items)||response.items.length!==response.returned_count||!Number.isSafeInteger(response.next_offset===null?0:Number(response.next_offset))) throw new Error('Resposta de página incompatível com o contrato esperado.');
+    state.closureData=response;
+    const entries=state.closureView==='approved'?response.items.filter(entry=>entry.approved):response.items;
+  state.closureTickets=entries.map(entry=>({numbers:entry.numbers,ticket_number:Number(response.offset||0)+(response.items||[]).indexOf(entry)+1,bonus:{}}));
+    target.innerHTML=closureOutputHtml('closure',response,item);
+  } catch(error) { if(version===renderVersion&&state.page==='tools'&&state.game===item.key) target.innerHTML=errorBlock(error.message); }
+}
+async function loadRepeatedClosurePage(offset) {
+  const item=spec(), version=renderVersion, output=$('#repeated-output');
+  if(!state.repeatedRequest||!state.repeatedDraw) return;
+  output.innerHTML='<div class="loading-block"><span class="spinner"></span>Calculando página e diagnósticos…</div>';
+  try {
+    const response=await api('/lotofacil/closures/repeated',{method:'POST',body:JSON.stringify({...state.repeatedRequest,previous_draw:state.repeatedDraw.numbers,offset})});
+    if(version!==renderVersion||state.page!=='tools'||state.game!=='lotofacil') return;
+    if(!Array.isArray(response.items)||response.items.length!==response.returned_count) throw new Error('Resposta do fechamento de repetidas inválida.');
+    state.repeatedData=response;
+    const entries=state.repeatedView==='approved'?response.items.filter(entry=>entry.approved):response.items;
+  state.repeatedTickets=entries.map(entry=>({numbers:entry.numbers,ticket_number:Number(response.offset||0)+(response.items||[]).indexOf(entry)+1,bonus:{}}));
+    output.innerHTML=closureOutputHtml('repeated',response,item);
+  } catch(error) { if(version===renderVersion&&state.page==='tools'&&state.game==='lotofacil') output.innerHTML=errorBlock(error.message); }
 }
 async function handleRepeatedClosure(event) {
   event.preventDefault(); const version=renderVersion, game=state.game, previous=state.repeatedDraw;
@@ -809,28 +1087,25 @@ async function handleRepeatedClosure(event) {
   if(game!=='lotofacil'||!previous) {output.innerHTML=errorBlock('Resultado anterior indisponível.');return;}
   const repeated=$$('[name="repeated-number"]:checked').map(el=>Number(el.value));
   if(repeated.length<6||repeated.length>12||new Set(repeated).size!==repeated.length||repeated.some(n=>!previous.numbers.includes(n))) {output.innerHTML=errorBlock('Selecione de 6 a 12 dezenas distintas do resultado anterior; nenhum pedido foi enviado.');return;}
-  output.innerHTML='<div class="loading-block"><span class="spinner"></span>Calculando todas as combinações…</div>';
   try {
-    const response=await api('/lotofacil/closures/repeated',{method:'POST',body:JSON.stringify({previous_draw:previous.numbers,repeated})});
-    if(version!==renderVersion||state.page!=='tools'||state.game!==game) return;
-    if(!Array.isArray(response.games)||response.game_count!==response.games.length) throw new Error('Resposta de desdobramento inválida.');
-    state.repeatedTickets=response.games.map((numbers,index)=>({numbers,ticket_number:index+1,bonus:{}}));
-    const lines=response.games.map(numbers=>numbers.map(n=>padNum(n,2)).join(' ')).join('\n');
-    const forward=response.game_count<=500?'<div class="form-actions"><button type="button" class="button button-primary" data-action="test-repeated">Encaminhar todos ao conferidor</button></div>':'<div class="notice notice-warning"><span>ⓘ</span><span>Este resultado excede o limite de 500 jogos do conferidor. Nada foi encaminhado; reduza as repetidas e gere novamente para obter até 500 jogos.</span></div>';
-    output.innerHTML=`<div class="stats-highlight"><div class="mini-stat"><small>Jogos gerados</small><b>${esc(response.game_count)}</b></div><div class="mini-stat"><small>Concurso anterior</small><b>${esc(response.label||previous.contest)}</b></div></div><p class="small-note">${esc(response.disclaimer||'Desdobramento informativo, sem garantia de premiação.')}</p><div class="field"><label for="repeated-games">Todos os jogos gerados</label><textarea id="repeated-games" rows="8" readonly>${esc(lines)}</textarea></div>${forward}`;
+    const filters=readClosureRequest('repeated');
+    state.repeatedRequest={repeated,filters:filters.filters,reference_contest:filters.reference_contest,page_size:filters.page_size};
+    state.repeatedView='all';
+    if(version!==renderVersion||state.page!=='tools'||state.game!==game)return;
+    await loadRepeatedClosurePage(0);
   } catch(error) { if(version===renderVersion&&state.page==='tools'&&state.game===game) output.innerHTML=errorBlock(error.message); }
 }
 async function handleClosure(event) {
   event.preventDefault();
   const item=spec(), version=renderVersion, target=$('#closure-output');
-  const parse=raw=>{const text=raw.trim(); if (!text) return []; const parts=text.split(/[\s,;|]+/); if (parts.some(part=>!/^\d+$/.test(part))) throw new Error('Use apenas dezenas inteiras separadas por espaços ou vírgulas.'); return parts.map(Number);};
+  const parse=raw=>{const text=raw.trim(); if (!text) return []; const parts=text.split(/[\s,;|]+/); if (parts.some(part=>!/^[0-9]+$/.test(part))) throw new Error('Use apenas dezenas inteiras separadas por espaços ou vírgulas.'); return parts.map(Number);};
   try {
+    const filters=readClosureRequest('closure');
     const pool=parse($('#closure-pool').value), fixed=parse($('#closure-fixed').value), pick_count=Number($('#closure-picks').value);
-    const response=await api(`/${item.key}/closures/exhaustive`,{method:'POST',body:JSON.stringify({pool,fixed,pick_count})});
-    if (version!==renderVersion || state.page!=='tools' || state.game!==item.key) return;
-    state.closureTickets=response.games.map((numbers,index)=>({numbers,ticket_number:index+1,bonus:{}}));
-    const lines=response.games.map(numbers=>numbers.map(n=>padNum(n,item.digits)).join(' ')).join('\n');
-    target.innerHTML=`<div class="stats-highlight"><div class="mini-stat"><small>Jogos gerados</small><b>${esc(response.game_count)}</b></div></div><p class="small-note">${esc(response.coverage)}</p><div class="field"><label for="closure-games">Combinações geradas (copie para guardar)</label><textarea id="closure-games" rows="8" readonly>${esc(lines)}</textarea></div>${response.game_count<=500?'<div class="form-actions"><button type="button" class="button" data-action="test-closure">Preparar conferência destes jogos</button></div>':'<p class="small-note">Para conferir, copie e divida em lotes de até 500 jogos.</p>'}`;
+    state.closureRequest={pool,fixed,pick_count,filters:filters.filters,reference_contest:filters.reference_contest,page_size:filters.page_size};
+    state.closureView='all';
+    if(version!==renderVersion||state.page!=='tools'||state.game!==item.key)return;
+    await loadClosurePage(0);
   } catch(error) { target.innerHTML=errorBlock(error.message); }
 }
 function renderProbabilityTiers(tiers, awardTiersOverlap=false) {
@@ -870,13 +1145,13 @@ async function calculateProbability(event) {
     const data=await api(`/${item.key}/probability${query.length?'?'+query.join('&'):''}`);
     if (version!==renderVersion || state.page!=='tools' || state.game!==item.key) return;
     const any=data.any_prize?`<div class="mini-stat"><small>Qualquer faixa de prêmio</small><b>1 em ${esc(Number(data.any_prize.one_in).toLocaleString('pt-BR'))}</b><small>${esc(Number(data.any_prize.percent).toExponential(3))}% · eventos contabilizados sem dupla contagem</small>${renderExactOutcomes(data.any_prize)}</div>`:'';
-    target.innerHTML=`<div class="stats-highlight"><div class="mini-stat"><small>${esc(data.event)}</small><b>Aprox. 1 em ${esc(Number(data.one_in).toLocaleString('pt-BR'))}</b></div><div class="mini-stat"><small>Percentual teórico</small><b>${esc(Number(data.percent).toExponential(3))}%</b></div>${any}</div><div class="small-note">${esc(data.method)} Sorteios são aleatórios e independentes. ${esc(data.probability_scope||'Probabilidades combinatórias teóricas, não previsões.')} As razões “1 em N” são arredondadas para apresentação; abra a contagem inteira para ver a fração exata.</div>${renderProbabilityTiers(data.prize_tiers,data.award_tiers_overlap)}${renderHitDistribution(data.hit_distribution,data.hit_unit||'acertos')}`;
+    target.innerHTML=`<div class="stats-highlight"><div class="mini-stat"><small>${esc(probabilityEvent(item,data))}</small><b>Aprox. 1 em ${esc(Number(data.one_in).toLocaleString('pt-BR'))}</b></div><div class="mini-stat"><small>Percentual teórico</small><b>${esc(Number(data.percent).toExponential(3))}%</b></div>${any}</div><div class="small-note">${esc(data.method)} Sorteios são aleatórios e independentes. ${esc(data.probability_scope||'Probabilidades combinatórias teóricas, não previsões.')} As razões “1 em N” são arredondadas para apresentação; abra a contagem inteira para ver a fração exata.</div>${renderProbabilityTiers(data.prize_tiers,data.award_tiers_overlap)}${renderHitDistribution(data.hit_distribution,data.hit_unit||'acertos')}`;
     if (data.ticket_subbets!==undefined) target.insertAdjacentHTML('beforeend',`<div class="small-note">O bilhete múltiplo equivale a ${esc(Number(data.ticket_subbets).toLocaleString('pt-BR'))} subapostas simples distintas.</div>`);
   } catch(error) { target.innerHTML=errorBlock(error.message); }
 }
 async function handleGenerate(event) {
   event.preventDefault(); const item=spec(); const version=renderVersion;
-  const payload={count:Number($('#game-count').value||1),filters:{}};
+  const payload={count:Number($('#game-count').value||1),filters:{},pareto:$('#generator-pareto')?.checked===true};
   if (item.key!=='supersete') {
     for (const key of ['sum','even','repeat','prime','fibonacci','sequence','jumps','line','column','q1','q2','q3','q4']) {
       const min=$(`#filter-${key}-min`), max=$(`#filter-${key}-max`);
@@ -915,7 +1190,8 @@ async function handleGenerate(event) {
     const response=await api(`/${item.key}/generate`,{method:'POST',body:JSON.stringify(payload)});
     if (version!==renderVersion || state.page!=='generator' || state.game!==item.key) return;
     state.generated=response.items; state.simulatorTickets=[];
-    target.innerHTML=response.items.map(ticket=>`<div class="generated-ticket"><div class="generated-ticket-head"><b>Jogo ${esc(ticket.ticket_number)}</b><span class="pill">${payload.weights?'Ponderado':'Aleatório'}</span></div>${item.key==='supersete'?`<div class="col-grid">${ticket.columns.map((values,i)=>`<div class="col-box"><strong>COLUNA ${i+1}</strong>${balls(values)}</div>`).join('')}</div>`:`<div class="ball-row">${balls(ticket.numbers)}</div>`}${ticket.bonus?.month?`<div class="ticket-stats">Mês da Sorte: ${esc(months[Number(ticket.bonus.month)-1]||ticket.bonus.month)}</div>`:''}${ticket.bonus?.team?`<div class="ticket-stats">Time do Coração: ${esc(ticket.bonus.team)}</div>`:''}${ticket.bonus?.trevos?`<div class="ticket-stats">Trevos: ${balls(ticket.bonus.trevos,true)}</div>`:''}<div class="ticket-stats"><span>Soma: ${esc(ticket.sum??'—')}</span><span>Pares: ${esc(ticket.even_count)}</span><span>Ímpares: ${esc(ticket.odd_count)}</span><span>Repetidas do último: ${esc(ticket.repeated_from_latest)}</span><span>Chance teórica por jogo: 1 em ${esc(Number(ticket.probability.one_in).toLocaleString('pt-BR'))}</span></div></div>`).join('')+`<div class="form-actions"><button class="button button-primary" data-action="test-generated">Conferir estes jogos</button><a class="button" href="${API}/${item.key}/export.csv?limit=100">↓ Exportar histórico</a></div><div class="small-note">${esc(response.disclaimer)}</div>`;
+    target.innerHTML=response.items.map(ticket=>`<div class="generated-ticket"><div class="generated-ticket-head"><b>Jogo ${esc(ticket.ticket_number)}</b><span class="pill">${payload.pareto?'Aleatório · Pareto histórico':payload.weights?'Ponderado':'Aleatório'}</span></div>${item.key==='supersete'?`<div class="col-grid">${ticket.columns.map((values,i)=>`<div class="col-box"><strong>COLUNA ${i+1}</strong>${balls(values)}</div>`).join('')}</div>`:`<div class="ball-row">${balls(ticket.numbers)}</div>`}${ticket.bonus?.month?`<div class="ticket-stats">Mês da Sorte: ${esc(months[Number(ticket.bonus.month)-1]||ticket.bonus.month)}</div>`:''}${ticket.bonus?.team?`<div class="ticket-stats">Time do Coração: ${esc(ticket.bonus.team)}</div>`:''}${ticket.bonus?.trevos?`<div class="ticket-stats">Trevos: ${balls(ticket.bonus.trevos,true)}</div>`:''}<div class="ticket-stats"><span>Soma: ${esc(ticket.sum??'—')}</span><span>Pares: ${esc(ticket.even_count)}</span><span>Ímpares: ${esc(ticket.odd_count)}</span><span>Repetidas do último: ${esc(ticket.repeated_from_latest)}</span><span>${esc(probabilityEvent(item,ticket.probability))}: 1 em ${esc(Number(ticket.probability.one_in).toLocaleString('pt-BR'))}</span></div></div>`).join('')+`<div class="form-actions"><button class="button button-primary" data-action="test-generated">Conferir estes jogos</button><a class="button" href="${API}/${item.key}/export.csv?limit=100">↓ Exportar histórico</a></div><div class="small-note">${esc(response.disclaimer)}</div>`;
+    if (response.pareto) target.innerHTML+=`<div class="small-note">Pareto local: ${esc(response.pareto.draws_analyzed)} concursos até o concurso ${esc(response.pareto.latest_contest??'—')}; ${esc(response.pareto.total_appearances)} aparições observadas, conjunto selecionado ${esc((response.pareto.selected_numbers||[]).map(n=>padNum(n,item.digits)).join(' '))}. ${esc(response.pareto.scope||'Regra retrospectiva de 80%; não prevê resultados.')}</div>`;
     if (item.key==='maismilionaria') $$('.generated-ticket',target).forEach((element,index)=>{const count=response.items[index].probability.ticket_subbets;element.insertAdjacentHTML('beforeend',`<div class="ticket-stats">Subapostas distintas neste bilhete: ${esc(Number(count).toLocaleString('pt-BR'))}</div>`);});
     if (item.key==='lotomania') $$('.generated-ticket',target).forEach((element,index)=>{const counts=lotomaniaQuadrantCounts(response.items[index].numbers);element.insertAdjacentHTML('beforeend',`<div class="ticket-stats quadrant-counts"><span>Q1: ${counts.Q1}</span><span>Q2: ${counts.Q2}</span><span>Q3: ${counts.Q3}</span><span>Q4: ${counts.Q4}</span></div>`);});
   } catch(error) { target.innerHTML=errorBlock(error.message); }
@@ -971,8 +1247,11 @@ async function handleSimulate(event) {
     const response=await api(`/${item.key}/simulate`,{method:'POST',body:JSON.stringify(request)});
     if (version!==renderVersion || state.page!=='simulator' || state.game!==item.key) return;
     const clientOrigin=response.draw_origin==='client_submitted';
+    const draw=response.draw||{};
+    const provenanceText=response.provenance?.description||(clientOrigin?'Dados enviados pelo navegador; o servidor não verificou sua origem.':'Origem do resultado não verificada independentemente.');
+    const drawWarning=draw.warning||response.warning||response.provenance?.warning;
     state.simpleSimulation={response,tickets,game:item.key};
-    target.innerHTML=`<div class="card" style="box-shadow:none;padding:12px;border-color:#dfe9de"><div class="card-head"><div><h3 class="card-title">Resultado do concurso ${esc(response.contest)}</h3><div class="card-subtitle">${esc(response.draw_date||'')}</div></div><span class="pill">${clientOrigin?'Dados enviados pelo navegador':'Servidor ou cache'}</span></div><div class="ball-row">${balls(response.draw.numbers)}${response.draw.second_numbers?.length?balls(response.draw.second_numbers):''}${response.draw.trevos?.length?balls(response.draw.trevos,true):''}</div>${response.results.map(result=>{const awards=awardDisplay(result);return `<div class="draw-row"><div class="draw-title">Jogo ${esc(result.ticket_number)}</div><div>${result.main_hits!==undefined?`<b>${esc(result.main_hits)} acertos</b>`:`<b>${esc(result.hits)} colunas</b>`}${result.second_hits!==undefined?` · 2º sorteio ${esc(result.second_hits)}`:''} ${awards?`<span class="pill pill-warm">${esc(awards)}</span>`:'<span class="pill pill-muted">Sem faixa de premiação</span>'}${result.month_hit?'<span class="pill">Mês da Sorte</span>':''}${result.team_hit?'<span class="pill">Time do Coração</span>':''}${result.trevo_hits?`<span class="pill">${esc(result.trevo_hits)} trevos</span>`:''}</div></div>`}).join('')}<div class="form-actions"><button type="button" class="button" data-action="download-simple-report">Baixar relatório CSV</button></div><div class="small-note">${clientOrigin?'Os dados do concurso foram enviados pelo navegador e não foram verificados quanto à origem pelo servidor. ':''}O relatório é gerado no seu dispositivo; nada é salvo pelo servidor. A conferência é informativa; confirme premiações no portal oficial da CAIXA.</div></div>`;
+    target.innerHTML=`<div class="card" style="box-shadow:none;padding:12px;border-color:#dfe9de"><div class="card-head"><div><h3 class="card-title">Resultado do concurso ${esc(response.contest)}</h3><div class="card-subtitle">${esc(response.draw_date||'')}</div></div><span class="pill">${clientOrigin?'Dados enviados pelo navegador':'Origem não verificada'}</span></div><div class="small-note">${esc(provenanceText)} ${esc(draw.source?`Fonte informada pelo navegador: ${draw.source}.`:"")}</div>${drawWarning?`<div class="notice notice-warning">${esc(drawWarning)} · o concurso pode estar desatualizado; confirme na CAIXA.</div>`:""}<div class="ball-row">${balls(draw.numbers)}${draw.second_numbers?.length?balls(draw.second_numbers):''}${draw.trevos?.length?balls(draw.trevos,true):''}</div>${response.results.map(result=>{const awards=awardDisplay(result);return `<div class="draw-row"><div class="draw-title">Jogo ${esc(result.ticket_number)}</div><div>${result.main_hits!==undefined?`<b>${esc(result.main_hits)} acertos</b>`:`<b>${esc(result.hits)} colunas</b>`}${result.second_hits!==undefined?` · 2º sorteio ${esc(result.second_hits)}`:''} ${awards?`<span class="pill pill-warm">${esc(awards)}</span>`:'<span class="pill pill-muted">Sem faixa de premiação</span>'}${result.month_hit?'<span class="pill">Mês da Sorte</span>':''}${result.team_hit?'<span class="pill">Time do Coração</span>':''}${result.trevo_hits?`<span class="pill">${esc(result.trevo_hits)} trevos</span>`:''}</div></div>`}).join('')}<div class="form-actions"><button type="button" class="button" data-action="download-simple-report">Baixar relatório CSV</button></div><div class="small-note">O relatório é gerado no seu dispositivo; nada é salvo pelo servidor. A conferência é informativa; confirme premiações no portal oficial da CAIXA.</div></div>`;
   } catch(error) { target.innerHTML=errorBlock(error.message); }
 }
 function handleClick(event) {
@@ -1013,10 +1292,18 @@ function handleClick(event) {
     return;
   }
   if (event.target.closest('[data-action="assistant-generate"]')) { generateAssistantTicket(); return; }
+  if (aiButton?.dataset.action==='import-prepare-simulator') { prepareImportForSimulator(); return; }
+  if (aiButton?.dataset.action==='my-games-clear-filters') { clearMyGamesFilters(); return; }
+  if (aiButton?.dataset.action==='my-game-remove') { removeMyGame(aiButton.dataset.gameId); return; }
+  if (aiButton?.dataset.action==='my-game-use') { useMyGame(aiButton.dataset.gameId); return; }
   if (aiButton?.dataset.action==='download-simple-report') { downloadSimpleSimulation(); return; }
   if (aiButton?.dataset.action==='download-history-report') { downloadHistorySimulation(); return; }
   if (['results-latest','results-newer','results-older'].includes(aiButton?.dataset.action)) { navigateResultsHistory(aiButton.dataset.action); return; }
   if (aiButton?.dataset.action==='fill-all-contests') { fillAllAvailableContestRange(); return; }
+  if (aiButton?.dataset.action==='closure-prev') { loadClosurePage(Math.max(0,Number(state.closureData?.offset||0)-Number(state.closureData?.page_size||0))); return; }
+  if (aiButton?.dataset.action==='closure-next') { if(state.closureData?.next_offset!==null)loadClosurePage(Number(state.closureData?.next_offset)); return; }
+  if (aiButton?.dataset.action==='repeated-prev') { loadRepeatedClosurePage(Math.max(0,Number(state.repeatedData?.offset||0)-Number(state.repeatedData?.page_size||0))); return; }
+  if (aiButton?.dataset.action==='repeated-next') { if(state.repeatedData?.next_offset!==null)loadRepeatedClosurePage(Number(state.repeatedData?.next_offset)); return; }
   if (event.target.closest('[data-action="test-repeated"]')) {
     if (state.game!=='lotofacil'||state.repeatedTickets.length>500) {toast('O conferidor aceita até 500 jogos; nenhum jogo foi encaminhado.');return;}
     const item=spec(); state.simulatorTickets=state.repeatedTickets.map(ticket=>({...ticket}));
@@ -1024,6 +1311,7 @@ function handleClick(event) {
     state.simulatorBonus={}; state.page='simulator'; render(); return;
   }
   if (event.target.closest('[data-action="test-closure"]')) {
+    if(state.closureTickets.length>500) {toast('O conferidor aceita até 500 jogos; reduza a página ou filtre os aprovados. Nenhum jogo foi encaminhado.');return;}
     const item=spec();
     state.simulatorTickets=state.closureTickets.map(ticket=>({...ticket}));
     state.simulatorText=state.simulatorTickets.map(ticket=>ticket.numbers.map(n=>padNum(n,item.digits)).join(' ')).join('\n');
@@ -1039,6 +1327,8 @@ function handleClick(event) {
 }
 function handleChange(event) {
   if (event.target.id==='history-sort') renderHistorySimulation();
+  if (event.target.id==='closure-view') changeClosureView('closure',event.target.value);
+  if (event.target.id==='repeated-view') changeClosureView('repeated',event.target.value);
   if (event.target.id==='results-page-size') {
     const limit=Number(event.target.value), history=state.resultsHistory;
     if (![30,50,100].includes(limit)||!history||history.game!==state.game) return;

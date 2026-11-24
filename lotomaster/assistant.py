@@ -8,6 +8,11 @@ from .analytics import analyze_draws
 from .catalog import get_spec
 
 _GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+_GENERATIVE_DISCLAIMER = (
+    "Frequências, atrasos e padrões descrevem somente o histórico consultado; "
+    "não são probabilidades futuras nem aumentam a chance de uma combinação. "
+    "Em sorteios justos e independentes, o histórico não altera as chances teóricas."
+)
 
 
 def _local_commentary(spec: dict, analysis: dict) -> str:
@@ -77,19 +82,24 @@ def _gemini_commentary(spec: dict, analysis: dict, local_commentary: str) -> tup
         text = " ".join(part.get("text", "").strip() for part in parts if part.get("text", "").strip())
         if not text:
             raise ValueError("O modelo não retornou uma análise textual.")
-        # A ressalva é sempre anexada pelo servidor, mesmo com uma resposta generativa.
-        return text, model, "available"
+        # A resposta do modelo pode omitir ou contradizer as limitações; exibimos a ressalva de forma independente.
+        return f"{text}\n\n{_GENERATIVE_DISCLAIMER}", model, "available"
     except Exception:
         # Não derruba a consulta de dados quando o provedor de IA está indisponível.
         return local_commentary, model, "temporarily_unavailable"
 
 
-def build_assistant_report(game: str, draws: list[dict], use_gemini: bool = True) -> dict:
+def build_assistant_report(game: str, draws: list[dict], use_gemini: bool = False) -> dict:
     spec = get_spec(game)
     analysis = analyze_draws(spec["key"], draws)
     local_commentary = _local_commentary(spec, analysis)
-    if use_gemini:
+    # A camada de serviço mantém o opt-in; as rotas HTTP validam token e limite
+    # antes de chamar este relatório com a chave do servidor.
+    server_enabled = os.getenv("LOTOMASTER_ENABLE_SERVER_GEMINI", "").lower() == "true"
+    if use_gemini and server_enabled:
         commentary, model, ai_status = _gemini_commentary(spec, analysis, local_commentary)
+    elif use_gemini:
+        commentary, model, ai_status = local_commentary, None, "server_disabled"
     else:
         commentary, model, ai_status = local_commentary, None, "local_only"
 
@@ -111,6 +121,7 @@ def build_assistant_report(game: str, draws: list[dict], use_gemini: bool = True
         "ai": {
             "status": ai_status,
             "provider": "Google Gemini" if ai_status == "available" else "análise local explicável",
+            "attempted_provider": "Google Gemini" if ai_status in {"available", "temporarily_unavailable", "not_configured"} else None,
             "model": model,
         },
         "selection_policy": "uniform_random",

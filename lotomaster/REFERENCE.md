@@ -29,6 +29,12 @@ Também foi observado o índice de ferramentas da Lotofácil em <https://www.maz
 - Há seleções especiais: Mês da Sorte (Dia de Sorte), dois sorteios (Dupla Sena), Time do Coração (Timemania), sete colunas com dígitos (Super Sete) e Trevos da Sorte (+Milionária).
 - As listas de tabelas incluem, conforme a modalidade, frequência, atraso, pares/ímpares, repetidas, primos, Fibonacci, múltiplos de três, soma, duplas/trincas, padrões, quadrantes, linhas/colunas, moldura/centro, binário e filtros.
 
+### Observações adicionais em sessão autenticada da Lotofácil
+
+- Na calculadora (<https://www.mazusoft.com.br/lotofacil/calculadora.php>), para jogo de 15 dezenas com 10 fixas e 8 removidas, foi retornada a contagem 21; com 8 fixas e 7 removidas, foi retornada 120. Esses valores são compatíveis com a contagem de combinações `C(25-f-r,p-f)` nas entradas observadas. A linha “14 Pontos - 1 em 0,80” também apareceu no segundo caso, mas sua semântica não foi determinada; não deve ser copiada nem interpretada como probabilidade.
+- Na ferramenta de combinações (<https://www.mazusoft.com.br/lotofacil/combinacoes.php>), foram observadas as opções “contém”, “combinação exata” e “não contém”. A busca “contém 01 e 02” retornou 1.352 de 3.835. A seleção “combinação exata 01 e 02” produziu erro; não há evidência para concluir qual comportamento interno seria esperado. A Lotomaster oferece esses critérios com definições matemáticas próprias, sem alegar reprodução do sistema de referência.
+- Essas observações são exemplos pontuais, não validação de equivalência geral. Não foram gerados ou salvos jogos.
+
 ## Fonte oficial de resultados
 
 A interface consulta a API pública do Portal de Loterias da CAIXA e mantém um cache local SQLite. Os endpoints usados são:
@@ -45,6 +51,35 @@ A interface consulta a API pública do Portal de Loterias da CAIXA e mantém um 
 
 A consulta pode acrescentar o número do concurso ao caminho do endpoint para recuperar um concurso específico. A implementação persiste os dados normalizados recebidos e continua servindo o cache se a fonte oficial ficar indisponível.
 
+### Indicador de concurso especial observado na API
+
+Nos registros oficiais consultados, `indicadorConcursoEspecial=1` identifica um concurso regular e `=2` identifica um concurso especial: a [Mega-Sena 2811, de 04/01/2025](https://servicebus2.caixa.gov.br/portaldeloterias/api/megasena/2811) retorna `1`, enquanto a [Mega da Virada 2810, de 31/12/2024](https://servicebus2.caixa.gov.br/portaldeloterias/api/megasena/2810) retorna `2`. A [página oficial da Mega-Sena](https://loterias.caixa.gov.br/Paginas/mega-sena.aspx) descreve as regras da Mega da Virada como concurso especial. O `tipoJogo` permanece `MEGA_SENA` nos dois registros e não deve ser usado para inferir esse indicador. O normalizador do backend e o fallback do navegador tratam agora `1` como regular e `2` como especial.
+
+## Regras oficiais usadas nos cálculos de probabilidade
+
+- [CAIXA — regras dos sorteios](https://loterias.caixa.gov.br/Paginas/regras-sorteios.aspx): universos e tamanhos dos sorteios; dois sorteios da Dupla Sena; reposição antes do sorteio do Time do Coração da Timemania no universo de 01 a 80; sete colunas independentes do Super Sete; sorteio separado dos dois trevos entre seis na +Milionária.
+- [CAIXA — Timemania](https://loterias.caixa.gov.br/paginas/timemania.aspx): escolha de dez números entre oitenta e de um Time do Coração; premiação para o time sorteado ou para três a sete acertos.
+- [CAIXA — +Milionária](https://loterias.caixa.gov.br/Paginas/Mais-Milionaria.aspx): a página oficial lista dez faixas de premiação e define a Faixa 10 como 2 prognósticos certos + 1 trevo; as Faixas 2, 4 e 6 agrupam 6, 5 e 4 acertos, respectivamente, com 1 ou nenhum trevo.
+- [CAIXA — +Milionária, notícias](https://caixanoticias.caixa.gov.br/Paginas/Not%C3%ADcias/2023/07-Julho/milionaria-passa-a-ter-dois-sorteios-toda-semana.aspx): informa a possibilidade de apostas múltiplas com 6–12 dezenas e 2–6 trevos. Esse intervalo está implementado na geração, validação, conferência simples/histórica e cálculo de probabilidades nesta versão.
+
+A calculadora usa contagem hipergeométrica para dezenas sem reposição e contagem exata por coluna para o Super Sete. Na +Milionária, uma aposta de `n` dezenas e `t` trevos corresponde a `C(n,6) × C(t,2)` subapostas simples. Se `h` dezenas sorteadas estão entre as `n` escolhidas e `k` dos dois trevos sorteados estão entre os `t` escolhidos, a quantidade de subapostas com `x` acertos principais e `y` acertos de trevos é `C(h,x) × C(n-h,6-x) × C(k,y) × C(t-k,2-y)` (combinações fora do domínio valem zero). As probabilidades por faixa são de presença — pelo menos uma subaposta na faixa — sobre o espaço equiprovável `C(50,6) × C(6,2)`; linhas de faixas distintas podem se sobrepor no mesmo bilhete. “Qualquer prêmio” conta a união dos estados sorteados `h,k` uma única vez, sem somar faixas sobrepostas. A conferência também agrega, por faixa, a quantidade de subapostas premiadas sem serializar uma lista completa para bilhetes maiores. Categorias de bônus podem se sobrepor às faixas principais em outras modalidades; a saída identifica essa sobreposição e calcula “qualquer prêmio” como união dos eventos. Para Dupla Sena, a chance de um evento de faixa em pelo menos um dos sorteios considera a independência documentada das duas extrações. A contagem de combinações com fixas/removidas na Lotofácil é `C(25-f-r,p-f)`, uma quantidade de combinações admissíveis, não uma previsão nem probabilidade de prêmio. Nada disso replica fórmulas internas desconhecidas da MazuSoft nem prevê resultados.
+
+## Registros oficiais usados na auditoria
+
+O teste `tests/test_official_draw_probability_audit.py` usa respostas oficiais por número de concurso, para reproduzir a checagem sem depender de o endpoint genérico refletir o resultado mais recente. Foram conferidos resultados e campos adicionais aplicáveis:
+
+- Mega-Sena 3088 (19/11/2026): <https://servicebus2.caixa.gov.br/portaldeloterias/api/megasena/3088>
+- Lotofácil 3827 (11/11/2026): <https://servicebus2.caixa.gov.br/portaldeloterias/api/lotofacil/3827>
+- Lotomania 3000 (16/11/2026): <https://servicebus2.caixa.gov.br/portaldeloterias/api/lotomania/3000>
+- Quina 7161 (06/11/2026): <https://servicebus2.caixa.gov.br/portaldeloterias/api/quina/7161>
+- Dia de Sorte 1334 (28/10/2026): <https://servicebus2.caixa.gov.br/portaldeloterias/api/diadesorte/1334> — Mês da Sorte.
+- Dupla Sena 3034 (18/11/2026): <https://servicebus2.caixa.gov.br/portaldeloterias/api/duplasena/3034> — primeiro e segundo sorteios.
+- Timemania 2455 (15/10/2026): <https://servicebus2.caixa.gov.br/portaldeloterias/api/timemania/2455> — Time do Coração.
+- Super Sete 909 (09/10/2026): <https://servicebus2.caixa.gov.br/portaldeloterias/api/supersete/909> — dígitos posicionais nas sete colunas.
+- +Milionária 405 (06/11/2026): <https://servicebus2.caixa.gov.br/portaldeloterias/api/maismilionaria/405> — dois trevos.
+
+Os cálculos foram comparados com contagens combinatórias exatas e, para o bilhete múltiplo de +Milionária, enumeração explícita independente de subapostas. A comparação é teórica e não usa frequências históricas para alterar probabilidades. A avaliação registra que não apareceu divergência matemática nessas amostras; a única divergência demonstrada foi a interpretação de `indicadorConcursoEspecial` documentada acima. As datas são de concursos fixos e não afirmam atualidade do histórico geral da CAIXA.
+
 ## Limites da inspeção
 
-A pesquisa usou conteúdo público extraído das páginas. Não foram feitos login, submissão de formulários, tentativas de acesso a páginas premium, nem inspeção de endpoints internos. Algumas tabelas premium e interações que exigem clique não puderam ser verificadas. O navegador direto recebeu uma verificação anti-bot; por isso, a paridade visual deve ser refinada com confirmação do proprietário ou uma captura de referência que possa ser acessada normalmente. As estatísticas desta implementação são cálculos descritivos transparentes e não reproduzem fórmulas proprietárias não documentadas.
+Além da pesquisa pública sem login, em etapa posterior foi observada uma sessão já autenticada da Lotofácil, incluindo os casos pontuais documentados acima; essa inspeção e a análise REA estão descritas em [MAPEAMENTO_MAZUSOFT_REA.md](MAPEAMENTO_MAZUSOFT_REA.md). Não foram gerados, salvos ou alterados jogos ou estudos. Algumas tabelas premium e interações não puderam ser verificadas; o erro da opção “combinação exata” não permite inferir seu comportamento. O navegador descartável do REA recebeu uma verificação anti-bot; por isso, a paridade não foi comprovada. As estatísticas desta implementação são cálculos descritivos transparentes e não reproduzem fórmulas proprietárias não documentadas. Para estatísticas de repetidas da Lotofácil, lacunas entre concursos tornam o indicador indisponível; na UI/IA esses dados não são apresentados como válidos, e o campo legado permanece zero apenas por compatibilidade.
