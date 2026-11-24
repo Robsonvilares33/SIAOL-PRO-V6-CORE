@@ -777,6 +777,114 @@ class MCPBranchEditTests(unittest.TestCase):
             staged_second = mcp_server._working_tree_fingerprint()
         self.assertNotEqual(staged_first, staged_second)
 
+    @unittest.skipUnless(os.name == "posix", "teste de grupo de processos requer POSIX")
+    def test_git_fingerprint_rejects_forced_process_group_cleanup_after_zero_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            marker = root / "child-survived.txt"
+            fake_git = fake_bin / "git"
+            child_script = (
+                "import pathlib,sys,time;time.sleep(2);"
+                "pathlib.Path(sys.argv[1]).write_text('alive')"
+            )
+            fake_git.write_text(
+                "#!/usr/bin/env python3\n"
+                "import subprocess,sys\n"
+                f"subprocess.Popen([sys.executable,'-c',{child_script!r},{str(marker)!r}])\n"
+                "sys.stdout.buffer.write(b'partial fingerprint')\n"
+                "sys.stdout.flush()\n",
+                encoding="utf-8",
+            )
+            fake_git.chmod(0o755)
+            with (
+                patch.object(mcp_server, "REPO_ROOT", root),
+                patch.dict(os.environ, {"PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", "")}),
+            ):
+                with self.assertRaisesRegex(ValueError, "interrompida"):
+                    mcp_server._git_stream_fingerprint(["diff"], max_bytes=1024, timeout=5)
+            threading.Event().wait(2.2)
+            self.assertFalse(marker.exists())
+
+    def test_fallback_snapshot_reads_at_most_limit_plus_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "file.py"
+            target.write_bytes(b"12345678")
+            with patch.object(mcp_server, "MAX_PROJECT_FILE_BYTES", 8):
+                _, snapshot = mcp_server._safe_worktree_snapshot_fallback(target)
+            self.assertEqual(snapshot, b"12345678")
+
+            target.write_bytes(b"12345678")
+            original_read = mcp_server._read_fd_limited
+            bytes_read = []
+
+            def grow_then_read(file_fd, limit):
+                with target.open("ab") as writer:
+                    writer.write(b"x" * 100_000)
+                content = original_read(file_fd, limit)
+                bytes_read.append(len(content))
+                return content
+
+            with (
+                patch.object(mcp_server, "MAX_PROJECT_FILE_BYTES", 8),
+                patch.object(mcp_server, "_read_fd_limited", side_effect=grow_then_read),
+            ):
+                with self.assertRaisesRegex(ValueError, "mudou durante a revisão"):
+                    mcp_server._safe_worktree_snapshot_fallback(target)
+            self.assertEqual(bytes_read, [9])
+
+    def test_review_withholds_diff_for_unverified_git_worktree_encoding(self):
+        temporary, root, target = self._repo()
+        self.addCleanup(temporary.cleanup)
+        body = [f"SECRETKEY{i:02d}abcdefghijklmnop" for i in range(12)]
+        original = "-----BEGIN PRIVATE KEY-----\n" + "\n".join(body) + "\n-----END PRIVATE KEY-----\n"
+        target.write_text(original, encoding="utf-8")
+        self._git(root, "add", "lotomaster/script.py")
+        self._git(root, "commit", "-q", "-m", "store UTF-8 PEM fixture")
+
+        attributes_file = root / ".gitattributes"
+        attributes_file.write_text("lotomaster/*.py working-tree-encoding=UTF-16LE\n", encoding="utf-8")
+        self._git(root, "add", ".gitattributes")
+        self._git(root, "commit", "-q", "-m", "configure working-tree encoding")
+        target.unlink()
+        self._git(root, "checkout", "--", "lotomaster/script.py")
+        changed = body.copy()
+        changed[6] = "ALTERNATEKEY06abcdefghijklmnop"
+        updated = "-----BEGIN PRIVATE KEY-----\n" + "\n".join(changed) + "\n-----END PRIVATE KEY-----\n"
+        target.write_bytes(updated.encode("utf-16le"))
+        git_diff = self._git(root, "diff", "--", "lotomaster/script.py").stdout
+        self.assertIn(changed[6], git_diff)
+
+        with patch.object(mcp_server, "REPO_ROOT", root), patch.dict(
+            os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"},
+        ):
+            self.assertEqual(
+                mcp_server._git_path_attributes("lotomaster/script.py")["working-tree-encoding"],
+                "UTF-16LE",
+            )
+            review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
+        self.assertTrue(review["diff_withheld"])
+        self.assertEqual(review["diff"], "")
+        self.assertNotIn(changed[6], review["diff"])
+
+    def test_review_withholds_diff_for_git_clean_filter(self):
+        temporary, root, target = self._repo()
+        self.addCleanup(temporary.cleanup)
+        target.write_text("changed content\n", encoding="utf-8")
+        attributes_file = root / ".gitattributes"
+        attributes_file.write_text("lotomaster/*.py filter=unverified\n", encoding="utf-8")
+        self._git(root, "add", ".gitattributes")
+        self._git(root, "commit", "-q", "-m", "configure custom clean filter")
+
+        with patch.object(mcp_server, "REPO_ROOT", root), patch.dict(
+            os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"},
+        ):
+            self.assertEqual(mcp_server._git_path_attributes("lotomaster/script.py")["filter"], "unverified")
+            review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
+        self.assertTrue(review["diff_withheld"])
+        self.assertEqual(review["diff"], "")
+
     def test_fingerprint_rejects_git_diff_larger_than_capture_limit(self):
         temporary, root, target = self._repo()
         self.addCleanup(temporary.cleanup)

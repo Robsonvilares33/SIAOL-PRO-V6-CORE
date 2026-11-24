@@ -723,8 +723,8 @@ def _git_stream_fingerprint(arguments: list[str], *, max_bytes: int, timeout: in
             aborted = True
             _stop_process_group(process)
             reader.join(timeout=1)
-        if reader.is_alive() or reader_failed.is_set():
-            raise ValueError("Leitura do diff Git incompleta; o fingerprint foi bloqueado.")
+        if reader.is_alive() or reader_failed.is_set() or aborted:
+            raise ValueError("Leitura do diff Git incompleta ou interrompida; o fingerprint foi bloqueado.")
         if output_limit_exceeded.is_set():
             raise ValueError("Git diff excede o limite do fingerprint; a verificação foi bloqueada.")
         return_code = process.poll()
@@ -1020,25 +1020,31 @@ def _indexed_preimage_is_safe(path: str) -> bool:
     return _indexed_preimage_snapshot(path) is not None
 
 
+def _git_path_attributes(path: str) -> dict[str, str]:
+    output = _git_output([
+        "check-attr", "-z", "--all", "--", path,
+    ])
+    fields = output.split("\0")
+    if fields and fields[-1] == "":
+        fields.pop()
+    if len(fields) % 3:
+        raise ValueError("Atributos Git incompletos durante a revisão do diff.")
+    attributes = {}
+    for offset in range(0, len(fields), 3):
+        stored_path, name, value = fields[offset:offset + 3]
+        if stored_path != path or not name:
+            raise ValueError("Atributos Git inválidos durante a revisão do diff.")
+        attributes[name] = value
+    return attributes
+
+
 def _safe_worktree_snapshot(path: str) -> tuple[tuple[int, ...], bytes] | None:
     parts = path.split("/")
     if not _is_editable_branch_path(path):
         raise ValueError("Caminho fora do conjunto seguro de revisão.")
     candidate = REPO_ROOT.joinpath(*parts)
     if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NONBLOCK"):
-        try:
-            before = candidate.stat(follow_symlinks=False)
-        except FileNotFoundError:
-            return None
-        if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_PROJECT_FILE_BYTES:
-            raise ValueError("Arquivo de trabalho inseguro durante a revisão do diff.")
-        raw = candidate.read_bytes()
-        after = candidate.stat(follow_symlinks=False)
-        signature_before = (before.st_dev, before.st_ino, before.st_mode, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
-        signature_after = (after.st_dev, after.st_ino, after.st_mode, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
-        if signature_before != signature_after or len(raw) != before.st_size or len(raw) > MAX_PROJECT_FILE_BYTES:
-            raise ValueError("Arquivo de trabalho mudou durante a revisão do diff.")
-        return signature_before, raw
+        return _safe_worktree_snapshot_fallback(candidate)
 
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     root_fd = parent_fd = file_fd = None
@@ -1081,6 +1087,54 @@ def _safe_worktree_snapshot(path: str) -> tuple[tuple[int, ...], bytes] | None:
                     pass
 
 
+def _safe_worktree_snapshot_fallback(candidate: Path) -> tuple[tuple[int, ...], bytes] | None:
+    try:
+        before = candidate.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > MAX_PROJECT_FILE_BYTES:
+        raise ValueError("Arquivo de trabalho inseguro durante a revisão do diff.")
+    try:
+        open_flags = (
+            os.O_RDONLY | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+        )
+        with os.fdopen(os.open(candidate, open_flags), "rb") as stream:
+            opened_before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(opened_before.st_mode) or opened_before.st_nlink != 1
+                or opened_before.st_size > MAX_PROJECT_FILE_BYTES
+            ):
+                raise ValueError("Arquivo de trabalho inseguro durante a revisão do diff.")
+            raw = _read_fd_limited(stream.fileno(), MAX_PROJECT_FILE_BYTES)
+            opened_after = os.fstat(stream.fileno())
+        after = candidate.stat(follow_symlinks=False)
+    except OSError:
+        raise ValueError("Arquivo de trabalho inacessível durante a revisão do diff.") from None
+    signature_before = (
+        before.st_dev, before.st_ino, before.st_mode, before.st_size, before.st_mtime_ns, before.st_ctime_ns,
+    )
+    signature_opened_before = (
+        opened_before.st_dev, opened_before.st_ino, opened_before.st_mode,
+        opened_before.st_size, opened_before.st_mtime_ns, opened_before.st_ctime_ns,
+    )
+    signature_opened_after = (
+        opened_after.st_dev, opened_after.st_ino, opened_after.st_mode,
+        opened_after.st_size, opened_after.st_mtime_ns, opened_after.st_ctime_ns,
+    )
+    signature_after = (
+        after.st_dev, after.st_ino, after.st_mode, after.st_size, after.st_mtime_ns, after.st_ctime_ns,
+    )
+    if (
+        len(raw) > MAX_PROJECT_FILE_BYTES or len(raw) != opened_before.st_size
+        or signature_before != signature_opened_before
+        or signature_opened_before != signature_opened_after
+        or signature_opened_after != signature_after
+    ):
+        raise ValueError("Arquivo de trabalho mudou durante a revisão do diff.")
+    return signature_before, raw
+
+
 def _capture_diff_source_versions(paths: list[str]) -> tuple[str, dict[str, Any]]:
     head = _git_output(["rev-parse", "HEAD"]).strip()
     if re.fullmatch(r"[0-9a-f]{40,64}", head) is None:
@@ -1090,6 +1144,11 @@ def _capture_diff_source_versions(paths: list[str]) -> tuple[str, dict[str, Any]
     for path in paths:
         if not _is_editable_branch_path(path):
             raise ValueError("Caminho fora do conjunto seguro de revisão.")
+        attributes = _git_path_attributes(path)
+        for attribute in ("filter", "working-tree-encoding"):
+            value = attributes.get(attribute, "unspecified").casefold()
+            if value not in {"unspecified", "unset"}:
+                raise ValueError("Conversão de conteúdo Git não verificável durante a revisão do diff.")
         head_source = _tracked_preimage_snapshot(path, head, strict=True)
         index_source = _indexed_preimage_snapshot(path, strict=True)
         worktree_source = _safe_worktree_snapshot(path)
@@ -1098,7 +1157,7 @@ def _capture_diff_source_versions(paths: list[str]) -> tuple[str, dict[str, Any]
                 captured_bytes += len(source[1])
                 if captured_bytes > MAX_BRANCH_SOURCE_SNAPSHOT_BYTES:
                     raise ValueError("Snapshot dos arquivos alterados excede o limite da revisão.")
-        sources[path] = (head_source, index_source, worktree_source)
+        sources[path] = (head_source, index_source, worktree_source, attributes)
     return head, sources
 
 
@@ -1131,13 +1190,13 @@ def _safe_changed_paths() -> tuple[list[str], list[str]]:
 
 def _redact_private_keys_from_file_versions(diff: str, sources: dict[str, Any]) -> str:
     sensitive_lines: set[str] = set()
-    for head_source, index_source, worktree_source in sources.values():
+    for head_source, index_source, worktree_source, _attributes in sources.values():
         file_versions = (head_source, index_source, worktree_source)
         for version in file_versions:
             if version is None:
                 continue
             raw = version[1]
-            text = raw.decode("utf-8", errors="replace")
+            text = raw.decode("utf-8-sig", errors="strict")
             for match in _PRIVATE_KEY_BLOCK.finditer(text):
                 sensitive_lines.update(line for line in match.group(0).splitlines() if line)
     if not sensitive_lines:
@@ -1166,7 +1225,7 @@ def _review_branch_diff(transport: str) -> dict[str, Any]:
         if staged_paths:
             literal_staged = [f":(literal){path}" for path in staged_paths]
             staged_diff = _git_output([
-                "diff", "--cached", "--no-ext-diff", "--no-color", "--no-renames", "--unified=3",
+                "diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames", "--unified=3",
                 head_before, "--", *literal_staged,
             ])
             if staged_diff:
@@ -1174,7 +1233,7 @@ def _review_branch_diff(transport: str) -> dict[str, Any]:
         if unstaged_paths:
             literal_unstaged = [f":(literal){path}" for path in unstaged_paths]
             unstaged_diff = _git_output([
-                "diff", "--no-ext-diff", "--no-color", "--no-renames", "--unified=3",
+                "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames", "--unified=3",
                 "--", *literal_unstaged,
             ])
             if unstaged_diff:
