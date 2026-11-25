@@ -464,6 +464,19 @@ class MCPReadOnlyTests(unittest.TestCase):
         self.assertEqual(result["total_lines"], 3)
         self.assertIn("3: after_secret", result["content"])
 
+    def test_quoted_redaction_does_not_merge_cr_with_following_lf(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = 'api_key = "first-secret\rsecond-secret"\nafter_secret\n'
+            (root / "app.py").write_bytes(source.encode("utf-8"))
+            with patch.object(mcp_server, "REPO_ROOT", root):
+                result = mcp_server._tool_result("read_project_file", {"path": "app.py"})
+        self.assertNotIn("first-secret", result["content"])
+        self.assertNotIn("second-secret", result["content"])
+        self.assertEqual(result["total_lines"], len(source.splitlines()))
+        self.assertEqual(result["total_lines"], 3)
+        self.assertIn("3: after_secret", result["content"])
+
     def test_redaction_handles_repeated_private_key_markers_without_backtracking(self):
         complete = "-----BEGIN RSA PRIVATE KEY-----\nsecret material\n-----END RSA PRIVATE KEY-----"
         redacted = mcp_server._redact_sensitive_text(complete)

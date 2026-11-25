@@ -401,7 +401,10 @@ def _redact_sensitive_key_values(text: str) -> str:
         output.append(text[cursor:value_start])
         if quote:
             output.append(f"{delimiter}[REDACTED]" + ("" if malformed_quote else delimiter))
-            output.extend(re.findall(r"\r\n|\r|\n|\v|\f|\x1c|\x1d|\x1e|\x85|\u2028|\u2029", text[value_start:value_end]))
+            line_breaks = re.findall(r"\r\n|\r|\n|\v|\f|\x1c|\x1d|\x1e|\x85|\u2028|\u2029", text[value_start:value_end])
+            output.extend(line_breaks)
+            if line_breaks and line_breaks[-1] == "\r" and text[value_end:value_end + 1] == "\n":
+                output.append("[REDACTED]")
         else:
             output.append("[REDACTED]")
         cursor = value_end

@@ -303,7 +303,17 @@ class LatestResultCacheTests(unittest.TestCase):
                 if saved == engine._GAP_FILL_WORKERS:
                     all_saved.set()
 
-        with patch("lotomaster.engine._GAP_FILL_BUDGET_SECONDS", 0.05), \
+        futures = []
+        pool = engine._gap_fill_pool
+        original_submit = pool.submit
+
+        def tracked_submit(*args, **kwargs):
+            future = original_submit(*args, **kwargs)
+            futures.append(future)
+            return future
+
+        with patch.object(pool, "submit", side_effect=tracked_submit), \
+             patch("lotomaster.engine._GAP_FILL_BUDGET_SECONDS", 0.05), \
              patch("lotomaster.engine.fetch_draw", side_effect=stalled_fetch), \
              patch("lotomaster.engine.storage.save_draw", side_effect=save):
             started = time.monotonic()
@@ -313,6 +323,8 @@ class LatestResultCacheTests(unittest.TestCase):
             self.assertLess(elapsed, 0.75)
             release.set()
             self.assertTrue(all_saved.wait(timeout=1))
+            for future in futures:
+                future.result(timeout=1)
 
     def test_gap_fill_worker_releases_slot_in_finally_before_returning(self):
         class CountingSlots:
