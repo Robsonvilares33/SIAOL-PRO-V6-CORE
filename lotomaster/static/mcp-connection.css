@@ -1,0 +1,85 @@
+.mcp-connect-card {
+  margin: 0 28px 16px;
+  border: 1px solid #d8e3db;
+  border-radius: 14px;
+  background: #fff;
+  color: #20362a;
+  box-shadow: 0 4px 16px rgba(19, 58, 43, .05);
+}
+.mcp-connect-card summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px;
+  cursor: pointer;
+  list-style: none;
+}
+.mcp-connect-card summary::-webkit-details-marker { display: none; }
+.mcp-connect-card summary::after {
+  content: "+";
+  margin-left: auto;
+  color: #547163;
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+.mcp-connect-card[open] summary::after { content: "−"; }
+.mcp-connect-title { font-weight: 750; }
+.mcp-connect-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #785a1e;
+  font-size: .82rem;
+  white-space: nowrap;
+}
+.mcp-connect-status i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #d69828;
+}
+.mcp-connect-body {
+  padding: 0 18px 18px;
+  border-top: 1px solid #edf1ed;
+  line-height: 1.55;
+}
+.mcp-connect-body p { margin: 11px 0; }
+.mcp-connect-lead { max-width: 940px; color: #394d42; }
+.mcp-connect-endpoints,
+.mcp-connect-instructions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 14px 0;
+}
+.mcp-connect-endpoints > div,
+.mcp-connect-instructions section,
+.mcp-connect-safety {
+  border: 1px solid #e5ebe6;
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: #fbfcfb;
+}
+.mcp-connect-endpoints strong { display: block; margin-bottom: 6px; }
+.mcp-connect-endpoints code {
+  display: block;
+  overflow-wrap: anywhere;
+  color: #15573b;
+  font-size: .9rem;
+}
+.mcp-connect-endpoints small { display: block; margin-top: 5px; color: #66736b; }
+.mcp-connect-instructions h3 { margin: 0 0 5px; font-size: .98rem; }
+.mcp-connect-instructions p { margin: 0; color: #4a5d51; }
+.mcp-connect-safety { border-color: #e8dfc7; background: #fffdf7; }
+.mcp-connect-safety p:last-child { margin-bottom: 0; }
+.mcp-connect-note { color: #6b746f; font-size: .88rem; }
+@media (max-width: 700px) {
+  .mcp-connect-card { margin: 0 14px 14px; }
+  .mcp-connect-card summary { align-items: flex-start; flex-wrap: wrap; padding: 14px; }
+  .mcp-connect-title { flex: 1 1 100%; }
+  .mcp-connect-status { white-space: normal; }
+  .mcp-connect-body { padding: 0 14px 14px; }
+  .mcp-connect-endpoints,
+  .mcp-connect-instructions { grid-template-columns: 1fr; }
+}

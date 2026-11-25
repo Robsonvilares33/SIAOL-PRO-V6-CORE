@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#153a2b">
+  <meta name="description" content="Resultados oficiais, estatísticas históricas, gerador e simulador de loterias brasileiras.">
+  <title>Lotomaster | Estatísticas e Resultados</title>
+  <link rel="stylesheet" href="/assets/app.css">
+  <link rel="stylesheet" href="/assets/mcp-connection.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <a class="brand" href="/" aria-label="Lotomaster início">
+        <span class="brand-mark" aria-hidden="true">L</span>
+        <span><strong>LOTO<span>MASTER</span></strong><small>inteligência em loterias</small></span>
+      </a>
+      <div class="side-caption">MODALIDADES</div>
+      <nav id="game-nav" class="game-nav" aria-label="Modalidades"></nav>
+      <div class="side-caption side-caption-tools">FERRAMENTAS</div>
+      <nav class="section-nav" aria-label="Ferramentas">
+        <button class="nav-item active" data-page="overview"><span class="nav-icon">▦</span>Visão geral</button>
+        <button class="nav-item" data-page="generator"><span class="nav-icon">✦</span>Gerador de jogos</button>
+        <button class="nav-item" data-page="simulator"><span class="nav-icon">✓</span>Conferir jogos</button>
+        <button class="nav-item" data-page="results"><span class="nav-icon">◷</span>Resultados</button>
+        <button class="nav-item" data-page="statistics"><span class="nav-icon">▤</span>Tabelas e estatísticas</button>
+        <button class="nav-item" data-page="assistant"><span class="nav-icon">✧</span>Assistente analítico</button>
+        <button class="nav-item" data-page="tools"><span class="nav-icon">⌘</span>Outras ferramentas</button>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="data-status"><i class="status-dot"></i><span>Fonte pública<br><b>CAIXA Econômica Federal</b></span></div>
+        <small>Estatísticas descritivas, sem promessa de premiação.</small>
+      </div>
+    </aside>
+
+    <div class="main-shell">
+      <header class="topbar">
+        <button class="menu-toggle" id="menu-toggle" aria-controls="sidebar" aria-expanded="false" aria-label="Abrir menu">☰</button>
+        <div class="breadcrumb"><span>LOTO MASTER</span><b>/</b><strong id="page-crumb">Visão geral</strong></div>
+        <div class="top-actions">
+          <label class="game-picker-label" for="game-picker">Modalidade</label>
+          <select id="game-picker" aria-label="Selecionar modalidade"></select>
+          <span id="sync-status" class="small-note" role="status">Atualiza automaticamente a cada 5 min</span>
+          <button class="icon-button" id="refresh-button" title="Atualizar dados" aria-label="Atualizar dados">↻</button>
+        </div>
+      </header>
+      <main id="main-content" class="content" tabindex="-1">
+        <div class="loading-block"><span class="spinner"></span>Carregando dados públicos...</div>
+      </main>
+      <details class="mcp-connect-card" id="mcp-connection-card">
+        <summary>
+          <span class="mcp-connect-title">Conectar agentes de IA (MCP)</span>
+          <span class="mcp-connect-status" role="status"><i aria-hidden="true"></i>Nenhum agente conectado</span>
+        </summary>
+        <div class="mcp-connect-body">
+          <p class="mcp-connect-lead">O Cue pode iniciar o servidor MCP por stdio local, sem endpoint público. O Grok Bot precisa de um servidor alcançável pela internet em HTTPS. Nenhum conector foi configurado e nenhum serviço remoto foi publicado.</p>
+          <div class="mcp-connect-endpoints">
+            <div><strong>Cue · MCP local stdio</strong><small>Programa</small><code>python3</code><small>Argumentos</small><code>-m lotomaster.mcp_server --transport stdio</code><small>Diretório de trabalho</small><code>&lt;caminho-do-checkout-no-computador-do-Cue&gt;</code><small>O checkout deste ambiente não deve ser presumido como compartilhado com o computador que inicia o Cue.</small></div>
+            <div><strong>Grok Bot · MCP remoto</strong><code>https://&lt;domínio-público&gt;/mcp</code><small>Pendente: domínio/DNS, HTTPS válido, proxy reverso seguro e serviço hospedado. Não há túnel público configurado.</small></div>
+          </div>
+          <div class="mcp-connect-instructions">
+            <section><h3>Configuração do Cue</h3><p>Cadastre um servidor MCP por comando local com o programa e argumentos acima e defina o diretório de trabalho real do checkout no computador que executará o processo. Instale Python 3.11 ou superior e, no diretório do checkout, execute <code>python3 -m pip install -r requirements.txt</code> no ambiente destinado ao Cue. Configure o Cue para usar o executável Python desse mesmo ambiente. O stdio local não exige Bearer.</p></section>
+            <section><h3>Requisitos do Grok Bot</h3><p>Configure uma URL MCP pública HTTPS e a autenticação Bearer no conector customizado. Será necessário hospedar o serviço atrás de TLS/proxy seguro, configurar o hostname permitido e guardar um segredo forte no ambiente do servidor. Isso é separado da API de modelos Grok/xAI.</p></section>
+          </div>
+          <div class="mcp-connect-safety"><strong>Somente leitura por padrão; edição local opcional</strong><p>Por padrão, o MCP lê código, regras e arquivos textuais permitidos do checkout, além do histórico que já exista no SQLite em modo somente leitura. Arquivos ocultos, bancos, credenciais e binários ficam excluídos; valores que parecem tokens/chaves são mascarados. Pode analisar jogos fornecidos na chamada e gerar prévias sem persistir. Não altera jogos ou estudos, aposta, opera contas, publica ou envia dados a terceiros. Jogos em localStorage de outro navegador não são acessíveis diretamente.</p><p>Há uma exceção opt-in de edição local, somente no transporte stdio com LOTOMASTER_MCP_ENABLE_BRANCH_EDIT=1 e nos arquivos explicitamente permitidos da branch autorizada. HTTP permanece somente leitura e não oferece escrita. O modo HTTP exige Bearer forte, mantido apenas no ambiente seguro do servidor e no campo protegido do conector remoto; nunca aparece nesta página. O modo local stdio do Cue não usa Bearer.</p><p>A edição exige checkout exclusivo durante a operação: uma checagem local otimista não impede Git externo ou outro processo de trocar a branch/arquivo. O campo branch informa a branch capturada no início da chamada, não garante qual branch estará ativa no instante da escrita.</p></div>
+          <p class="mcp-connect-note">Estado atual: desconectado. O modo Cue stdio está pronto no código, mas depende de o checkout existir no computador que iniciará o processo. O Grok Bot continua pendente de endpoint público HTTPS e configuração do servidor.</p>
+        </div>
+      </details>
+      <footer class="app-footer">
+        <span>Lotomaster · dados de concursos consultados no Portal de Loterias da CAIXA</span>
+        <span>Histórico e frequência não alteram a probabilidade de sorteio.</span>
+      </footer>
+    </div>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/assets/caixa-fallback.js" defer></script>
+  <script src="/assets/mcp-connection.js" defer></script>
+  <script src="/assets/ai-assistant.js" defer></script>
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>
