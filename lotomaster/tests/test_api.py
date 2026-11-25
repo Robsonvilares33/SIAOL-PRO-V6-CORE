@@ -79,6 +79,22 @@ class LotomasterApiTests(unittest.TestCase):
             invalid = self.client.post("/api/v1/megasena/simulate", json={"tickets": [{"numbers": [1, 2, 3, 4, 5]}]})
             self.assertEqual(invalid.status_code, 422)
 
+    def test_generate_reports_manual_weight_fallback(self):
+        with patch("lotomaster.api.storage.latest_draw", return_value=None):
+            response = self.client.post("/api/v1/megasena/generate", json={
+                "count": 1,
+                "seed": 1,
+                "weights": {"1": 1_000_000},
+                "filters": {"min_even": 6},
+            })
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()
+        self.assertTrue(data["weighting_fallback"])
+        self.assertTrue(data["items"][0]["weighting_fallback"])
+        self.assertIn("pesos manuais não aplicados", data["method"])
+        self.assertIn("não alteram a chance matemática", data["disclaimer"])
+        self.assertEqual(data["items"][0]["even_count"], 6)
+
     def test_generate_rejects_malformed_supersete_columns_and_fractional_pick_count(self):
         malformed = self.client.post("/api/v1/supersete/generate", json={"columns": {"1": "not-an-object"}})
         fractional = self.client.post("/api/v1/supersete/generate", json={"columns": {"1": {"pick_count": 1.5}}})

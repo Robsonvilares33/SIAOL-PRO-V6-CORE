@@ -53,6 +53,35 @@ class WeightedGenerationTests(unittest.TestCase):
         self.assertNotIn(3, nums)
         self.assertEqual(len(nums), len(set(nums)))
 
+    def test_extreme_weight_falls_back_without_weakening_hard_filters(self):
+        options = {
+            "pick_count": 6,
+            "fixed": [2],
+            "excluded": [3],
+            "weights": {"1": 1_000_000},
+            "filters": {"min_even": 6},
+            "seed": 1,
+        }
+        with patch("lotomaster.engine.storage.latest_draw", return_value=None):
+            ticket = generate_tickets("megasena", options)[0]
+        numbers = ticket["numbers"]
+        self.assertTrue(ticket["weighting_fallback"])
+        self.assertIn(2, numbers)
+        self.assertNotIn(1, numbers)
+        self.assertNotIn(3, numbers)
+        self.assertEqual(len(numbers), len(set(numbers)))
+        self.assertEqual(sum(number % 2 == 0 for number in numbers), 6)
+
+    def test_weights_without_eligible_numbers_are_marked_unapplied(self):
+        with patch("lotomaster.engine.storage.latest_draw", return_value=None):
+            ticket = generate_tickets("megasena", {
+                "fixed": [1],
+                "weights": {"1": 2},
+                "seed": 7,
+            })[0]
+        self.assertTrue(ticket["weighting_fallback"])
+        self.assertIn(1, ticket["numbers"])
+
     def test_no_weights_keeps_existing_rng_sample_path_and_empty_weights(self):
         with patch("lotomaster.engine.storage.latest_draw", return_value=None), \
              patch("lotomaster.engine._weighted_sample") as weighted_sample:

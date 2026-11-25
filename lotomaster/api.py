@@ -317,8 +317,14 @@ def game_generate(game: str, request: GenerateRequest):
         if pareto_details is not None:
             options["_pareto_details"] = pareto_details
         games = generate_tickets(spec["key"], options)
-        method = "amostragem ponderada manual sem reposição" if request.weights else "aleatório com fixos, removidos e filtros opcionais"
-        response = {"game": spec["key"], "game_name": spec["name"], "items": games, "count": len(games), "method": method, "disclaimer": "Filtros e pesos são escolhas estruturais de seleção, não previsões, e não alteram a chance matemática de cada jogo no sorteio."}
+        weighting_fallback = any(ticket.get("weighting_fallback") for ticket in games)
+        if weighting_fallback:
+            method = "pesos manuais não aplicados nos bilhetes sinalizados; filtros preservados"
+        elif request.weights:
+            method = "amostragem ponderada manual sem reposição"
+        else:
+            method = "aleatório com fixos, removidos e filtros opcionais"
+        response = {"game": spec["key"], "game_name": spec["name"], "items": games, "count": len(games), "method": method, "weighting_fallback": weighting_fallback, "disclaimer": "Filtros e pesos são escolhas estruturais de seleção, não previsões, e não alteram a chance matemática de cada jogo no sorteio."}
         if pareto_details is not None:
             response["pareto"] = {key: value for key, value in pareto_details.items() if key != "numbers"}
             response["pareto"]["selected_numbers"] = pareto_details["numbers"]

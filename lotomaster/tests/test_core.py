@@ -62,6 +62,18 @@ class GeneratorTests(unittest.TestCase):
         self.assertEqual(len(ticket["columns"]), 7)
         self.assertTrue(all(len(column) == 1 and 0 <= column[0] <= 9 for column in ticket["columns"]))
 
+    def test_super_sete_rejects_more_than_three_picks_per_column(self):
+        valid_columns = {str(column): {"pick_count": 3} for column in range(1, 8)}
+        with patch("lotomaster.engine.storage.latest_draw", return_value=None):
+            ticket = generate_tickets("supersete", {"columns": valid_columns, "seed": 2})[0]
+            for pick_count in (4, 10):
+                with self.subTest(pick_count=pick_count), self.assertRaisesRegex(ValueError, "de 1 a 3 opções"):
+                    generate_tickets("supersete", {
+                        "columns": {"1": {"pick_count": pick_count}},
+                        "seed": 2,
+                    })
+        self.assertEqual([len(column) for column in ticket["columns"]], [3] * 7)
+
     def test_milionaria_generates_unique_trevos(self):
         with patch("lotomaster.engine.storage.latest_draw", return_value=None):
             ticket = generate_tickets("maismilionaria", {"bonus": {"trevo_count": 2}, "seed": 17})[0]

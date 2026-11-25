@@ -396,3 +396,44 @@ test('selo de simulação reconhece provenance client_supplied com draw_origin d
   assert.match(source,/response\.provenance\?\.kind==='client_supplied'\|\|response\.draw_origin==='client_submitted'/);
   assert.match(source,/response\.provenance\?\.description\|\|\(clientOrigin/);
 });
+
+test('gerador valida pesos localmente, envia pesos válidos e comunica fallback', async () => {
+  async function submit(weightText, data={items:[],weighting_fallback:false,disclaimer:'Sugestões sem vantagem comprovada.'}) {
+    let request;
+    const {context,elements}=setup(async (url,options)=>{
+      request={url,options};
+      return response(data);
+    });
+    vm.runInContext("state.catalog=[{key:'megasena',name:'Mega-Sena',digits:2,range:{minimum:1,maximum:60}}];state.game='megasena';state.page='generator'",context);
+    Object.assign(elements,{
+      '#game-count':{value:'1'},
+      '#generator-pareto':{checked:false},
+      '#generator-weights':{value:weightText},
+      '#generated-output':{innerHTML:''},
+    });
+    await vm.runInContext('handleGenerate({preventDefault(){}})',context);
+    return {request,output:elements['#generated-output'].innerHTML};
+  }
+
+  for (const value of ['1:0','1:0.0','1:-1','1:1e999','1:1000001','61:1','1:999999999999999999999999999999999999999999999999999']) {
+    const {request,output}=await submit(value);
+    assert.equal(request,undefined,`não deve enviar o peso inválido ${value}`);
+    assert.match(output,/peso.*positivo|dezenas únicas/);
+  }
+
+  const valid=await submit('1:2');
+  assert.ok(valid.request);
+  assert.deepEqual(JSON.parse(valid.request.options.body).weights,{1:2});
+
+  const fallbackTicket={
+    ticket_number:1,numbers:[2,4,6,8,10,12],sum:42,even_count:6,odd_count:0,
+    repeated_from_latest:0,probability:{event:'6 acertos',one_in:50063860},weighting_fallback:true,
+  };
+  const fallback=await submit('1:1000000',{
+    items:[fallbackTicket],weighting_fallback:true,
+    disclaimer:'Filtros e pesos são escolhas estruturais, não previsões.',
+  });
+  assert.match(fallback.output,/Pesos não aplicados/);
+  assert.match(fallback.output,/Pesos manuais não foram aplicados em 1 de 1 jogo/);
+  assert.match(fallback.output,/os filtros foram mantidos/);
+});

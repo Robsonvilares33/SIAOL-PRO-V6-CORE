@@ -1214,8 +1214,10 @@ async function handleGenerate(event) {
       const weights={};
       for (const part of weightText.split(',')) {
         const match=part.trim().match(/^(\d+)\s*:\s*(\d+(?:\.\d+)?)$/);
-        if (!match || Object.hasOwn(weights,String(Number(match?.[1])))) { $('#generated-output').innerHTML=errorBlock('Informe pesos únicos no formato dezena:peso, separados por vírgula. Use ponto para decimais.'); return; }
-        weights[String(Number(match[1]))]=Number(match[2]);
+        if (!match) { $('#generated-output').innerHTML=errorBlock('Informe pesos únicos no formato dezena:peso, separados por vírgula. Use ponto para decimais; cada peso deve ser positivo e no máximo 1.000.000.'); return; }
+        const number=Number(match[1]), weight=Number(match[2]), normalizedNumber=String(number);
+        if (!Number.isSafeInteger(number) || number<item.range.minimum || number>item.range.maximum || !Number.isFinite(weight) || weight<=0 || weight>1_000_000 || Object.hasOwn(weights,normalizedNumber)) { $('#generated-output').innerHTML=errorBlock(`Use dezenas únicas entre ${item.range.minimum} e ${item.range.maximum} e pesos positivos até 1.000.000.`); return; }
+        weights[normalizedNumber]=weight;
       }
       payload.weights=weights;
     }
@@ -1248,6 +1250,15 @@ async function handleGenerate(event) {
     if (requestId!==generatorRequestId || version!==renderVersion || state.page!=='generator' || state.game!==item.key) return;
     state.generated=response.items; state.simulatorTickets=[];
     target.innerHTML=response.items.map(ticket=>`<div class="generated-ticket"><div class="generated-ticket-head"><b>Jogo ${esc(ticket.ticket_number)}</b><span class="pill">${payload.pareto?'Aleatório · Pareto histórico':payload.weights?'Ponderado':'Aleatório'}</span></div>${item.key==='supersete'?`<div class="col-grid">${ticket.columns.map((values,i)=>`<div class="col-box"><strong>COLUNA ${i+1}</strong>${balls(values)}</div>`).join('')}</div>`:`<div class="ball-row">${balls(ticket.numbers)}</div>`}${ticket.bonus?.month?`<div class="ticket-stats">Mês da Sorte: ${esc(months[Number(ticket.bonus.month)-1]||ticket.bonus.month)}</div>`:''}${ticket.bonus?.team?`<div class="ticket-stats">Time do Coração: ${esc(ticket.bonus.team)}</div>`:''}${ticket.bonus?.trevos?`<div class="ticket-stats">Trevos: ${balls(ticket.bonus.trevos,true)}</div>`:''}<div class="ticket-stats"><span>Soma: ${esc(ticket.sum??'—')}</span><span>Pares: ${esc(ticket.even_count)}</span><span>Ímpares: ${esc(ticket.odd_count)}</span><span>Repetidas do último: ${esc(ticket.repeated_from_latest)}</span><span>${esc(probabilityEvent(item,ticket.probability))}: 1 em ${esc(Number(ticket.probability.one_in).toLocaleString('pt-BR'))}</span></div></div>`).join('')+`<div class="form-actions"><button class="button button-primary" data-action="test-generated">Conferir estes jogos</button><a class="button" href="${API}/${item.key}/export.csv?limit=100">↓ Exportar histórico</a></div><div class="small-note">${esc(response.disclaimer)}</div>`;
+    if (response.weighting_fallback) {
+      const fallbackCount=response.items.filter(ticket=>ticket.weighting_fallback).length;
+      for (const ticket of response.items.filter(ticket=>ticket.weighting_fallback)) {
+        const label=payload.pareto?'Aleatório · Pareto histórico':payload.weights?'Ponderado':'Aleatório';
+        const marker=`<b>Jogo ${esc(ticket.ticket_number)}</b><span class="pill">${label}</span>`;
+        target.innerHTML=target.innerHTML.replace(marker,`<b>Jogo ${esc(ticket.ticket_number)}</b><span class="pill">Pesos não aplicados</span>`);
+      }
+      target.innerHTML+=`<div class="small-note">Pesos manuais não foram aplicados em ${fallbackCount} de ${response.items.length} jogo(s); os filtros foram mantidos. Isso não altera a chance matemática no sorteio.</div>`;
+    }
     if (response.pareto) target.innerHTML+=`<div class="small-note">Pareto local: ${esc(response.pareto.draws_analyzed)} concursos até o concurso ${esc(response.pareto.latest_contest??'—')}; ${esc(response.pareto.total_appearances)} aparições observadas, conjunto selecionado ${esc((response.pareto.selected_numbers||[]).map(n=>padNum(n,item.digits)).join(' '))}. ${esc(response.pareto.scope||'Regra retrospectiva de 80%; não prevê resultados.')}</div>`;
     if (item.key==='maismilionaria') $$('.generated-ticket',target).forEach((element,index)=>{const count=response.items[index].probability.ticket_subbets;element.insertAdjacentHTML('beforeend',`<div class="ticket-stats">Subapostas distintas neste bilhete: ${esc(Number(count).toLocaleString('pt-BR'))}</div>`);});
     if (item.key==='lotomania') $$('.generated-ticket',target).forEach((element,index)=>{const counts=lotomaniaQuadrantCounts(response.items[index].numbers);element.insertAdjacentHTML('beforeend',`<div class="ticket-stats quadrant-counts"><span>Q1: ${counts.Q1}</span><span>Q2: ${counts.Q2}</span><span>Q3: ${counts.Q3}</span><span>Q4: ${counts.Q4}</span></div>`);});

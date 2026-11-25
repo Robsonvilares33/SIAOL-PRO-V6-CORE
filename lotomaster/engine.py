@@ -378,35 +378,42 @@ def generate_tickets(game: str, options: dict | None = None) -> list[dict]:
         if not allocations:
             raise ValueError("Não existe alocação que satisfaça os limites dos quadrantes, fixos/removidos e pick_count.")
     tries = max(300, count * 300)
-    weighted = bool(weights)
+    requested_weights = bool(weights)
+    weighted = requested_weights and any(number in available for number in weights)
     allocation_weights = (
         _quadrant_allocation_weights(available_q, allocations, fixed_q)
         if allocations is not None else None
     )
     for ticket_index in range(count):
         chosen = None
-        for _ in range(tries):
-            if allocations is not None:
-                allocation = rng.choices(allocations, weights=allocation_weights, k=1)[0]
-                numbers = []
-                for sector, pool, total in zip(sectors, available_q, allocation):
-                    fixed_sector = [n for n in fixed if n in sector]
-                    k = total - len(fixed_sector)
-                    local_weights = {n: weights[n] for n in pool if weights and n in weights}
-                    drawn = _weighted_sample(rng, pool, k, local_weights) if local_weights else rng.sample(pool, k)
-                    numbers.extend(fixed_sector + drawn)
-                numbers.sort()
-            elif weighted:
-                drawn = _weighted_sample(rng, available, pick_count - len(fixed), weights)
-                numbers = sorted(fixed + drawn)
-            else:
-                drawn = rng.sample(available, pick_count - len(fixed))
-                numbers = sorted(fixed + drawn)
-            if _passes_filters(numbers, filters, previous):
-                chosen = numbers
+        used_weight_fallback = False
+        sampling_passes = [(True, tries), (False, 1_000)] if weighted else [(False, tries)]
+        for use_weights, attempt_limit in sampling_passes:
+            for _ in range(attempt_limit):
+                if allocations is not None:
+                    allocation = rng.choices(allocations, weights=allocation_weights, k=1)[0]
+                    numbers = []
+                    for sector, pool, total in zip(sectors, available_q, allocation):
+                        fixed_sector = [n for n in fixed if n in sector]
+                        k = total - len(fixed_sector)
+                        local_weights = {n: weights[n] for n in pool if n in weights} if use_weights else {}
+                        drawn = _weighted_sample(rng, pool, k, local_weights) if local_weights else rng.sample(pool, k)
+                        numbers.extend(fixed_sector + drawn)
+                    numbers.sort()
+                elif use_weights:
+                    drawn = _weighted_sample(rng, available, pick_count - len(fixed), weights)
+                    numbers = sorted(fixed + drawn)
+                else:
+                    drawn = rng.sample(available, pick_count - len(fixed))
+                    numbers = sorted(fixed + drawn)
+                if _passes_filters(numbers, filters, previous):
+                    chosen = numbers
+                    used_weight_fallback = requested_weights and (not weighted or not use_weights)
+                    break
+            if chosen is not None:
                 break
         if chosen is None:
-            raise ValueError("Nenhum jogo atendeu aos filtros. Ajuste soma, paridade ou dezenas fixas/removidas.")
+            raise ValueError("Nenhum jogo atendeu aos filtros nas tentativas limitadas; isso não prova que os filtros sejam inviáveis. Ajuste filtros/pesos ou tente novamente.")
         extra = {}
         bonus_type = bonus.get("type")
         if bonus_type == "month":
@@ -436,7 +443,10 @@ def generate_tickets(game: str, options: dict | None = None) -> list[dict]:
             if type(trevo_count) is not int or not bonus["minimum"] <= trevo_count <= bonus["maximum"]:
                 raise ValueError(f"O gerador de +Milionária aceita de {bonus['minimum']} a {bonus['maximum']} trevos.")
             extra["trevos"] = sorted(rng.sample(range(1, 7), trevo_count))
-        generated.append(_ticket_summary(spec, {"numbers": chosen, **extra}, ticket_index + 1, previous))
+        summary = _ticket_summary(spec, {"numbers": chosen, **extra}, ticket_index + 1, previous)
+        if used_weight_fallback:
+            summary["weighting_fallback"] = True
+        generated.append(summary)
     return generated
 
 
