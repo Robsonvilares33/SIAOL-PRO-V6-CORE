@@ -194,11 +194,12 @@
     } finally {
       clearTimeout(deadline);
     }
-    const rows = [...byContest.values()]
+    const retained = [...byContest.values()]
+      .sort((a, b) => Number(b.contest) - Number(a.contest));
+    const rows = retained
       .filter(row => Number(row.contest) >= first && Number(row.contest) <= Number(newest.contest))
-      .sort((a, b) => Number(b.contest) - Number(a.contest))
       .slice(0, limit);
-    writeCache(cacheKey, rows.map(({ warning: _warning, ...row }) => row));
+    writeCache(cacheKey, retained.slice(0, 300).map(({ warning: _warning, ...row }) => row));
     if (!rows.length) throw new Error('Não foi possível obter concursos históricos da CAIXA.');
     const expected = Number(newest.contest) - first + 1;
     const partial = rows.length < expected;

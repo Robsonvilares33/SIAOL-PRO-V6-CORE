@@ -14,8 +14,9 @@ function frontend(values = {}, bonus = null, fetchImpl = null) {
   let requests = 0;
   const context = vm.createContext({
     window: {addEventListener() {}},
-    document: {querySelector: selector => elements[selector] || null},
+    document: {querySelector: selector => elements[selector] || null, querySelectorAll: () => []},
     localStorage,
+    TextEncoder,
     setTimeout:()=>1,
     clearTimeout:()=>{},
     fetch: async (...args) => { requests++; if (fetchImpl) return fetchImpl(...args); throw new Error('a rede não deve ser chamada neste teste'); },
@@ -276,6 +277,24 @@ test('aceita 23 dezenas na conferência simples da Lotofácil e envia o jogo int
   assert.match(elements['#sim-result'].innerHTML,/15 acertos/);
 });
 
+test('reutiliza colunas originais do Super Sete quando a entrada digitada equivale ao jogo salvo', async () => {
+  const calls=[];
+  const jsonResponse=payload=>({ok:true,status:200,headers:{get:()=> 'application/json'},json:async()=>payload});
+  const ticket={numbers:[1,2,3,4,5,6,7],columns:[[1,8],[2],[3,4],[4],[5],[6],[7]],ticket_number:17,bonus:{}};
+  const fetchImpl=async(url,options={})=>{
+    calls.push({url,options});
+    if(url.endsWith('/latest')) return jsonResponse({contest:1,draw_date:'01/01/2026',numbers:[0,1,2,3,4,5,6]});
+    return jsonResponse({draw_origin:'client_submitted',contest:1,draw:{numbers:[0,1,2,3,4,5,6]},results:[{ticket_number:17,main_hits:2}]});
+  };
+  const {context}=frontend({'#sim-numbers':' 1   2 3 4 5 6 7 \n','#sim-contest':''},null,fetchImpl);
+  context.preloadedTicket=ticket;
+  vm.runInContext("state.catalog=[{key:'supersete',bonus:{type:'columns'},min_pick:7,max_pick:7,pick_size:7,digits:1,range:{minimum:0,maximum:9}}];state.game='supersete';state.simulatorTickets=[preloadedTicket];state.simulatorText='1 2 3 4 5 6 7';",context);
+  await vm.runInContext('handleSimulate({preventDefault(){}})',context);
+  const request=JSON.parse(calls.find(call=>call.url.endsWith('/supersete/simulate')).options.body);
+  assert.deepEqual(request.tickets[0].columns,[[1,8],[2],[3,4],[4],[5],[6],[7]]);
+  assert.equal(request.tickets[0].ticket_number,17);
+});
+
 test('rejeita 24 dezenas antes de enviar a conferência Lotofácil', async () => {
   const values=Array.from({length:24},(_,i)=>i+1);
   const {context,elements,requests}=frontend({'#sim-numbers':values.join(' ')});
@@ -333,6 +352,30 @@ test('divide conferência histórica em blocos compatíveis com o limite do endp
   assert.equal(result.evaluated_tickets,1);
 });
 
+test('divide payload histórico acima de 2 MB medidos em UTF-8 e agrega respostas', async () => {
+  const calls=[];
+  const jsonResponse=payload=>({ok:true,status:200,headers:{get:()=> 'application/json'},json:async()=>payload});
+  const fetchImpl=async(url,options={})=>{
+    const body=JSON.parse(options.body);
+    calls.push({url,body,byteLength:new TextEncoder().encode(options.body).byteLength});
+    return jsonResponse({draws:body.draws.map(draw=>({contest:draw.contest,results:[{ticket_number:1,main_hits:0}]})),summary:{'0 acertos':body.draws.length}});
+  };
+  const {context}=frontend({},null,fetchImpl);
+  const tickets=[{numbers:Array.from({length:15},(_,index)=>index+1),ticket_number:1}];
+  const draws=Array.from({length:3},(_,index)=>({contest:index+1,numbers:Array.from({length:15},(__,n)=>n+1),padding:'🚀'.repeat(180000)}));
+  context.tickets=tickets;
+  context.draws=draws;
+  const originalBytes=Buffer.byteLength(JSON.stringify({tickets,draws}),'utf8');
+  assert.ok(originalBytes>2_000_000);
+  const result=await vm.runInContext('simulateHistoryInChunks("lotofacil",tickets,draws,null)',context);
+  assert.equal(calls.length,3);
+  assert.ok(calls.every(call=>call.url.endsWith('/lotofacil/simulate/history')&&call.byteLength<=2_000_000));
+  assert.deepEqual(calls.map(call=>call.body.draws.length),[1,1,1]);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.draws.map(draw=>draw.contest))),[1,2,3]);
+  assert.equal(result.summary['0 acertos'],3);
+  assert.equal(result.evaluated_contests,3);
+});
+
 test('ordena por maior acerto e oferece exportação local do relatório histórico', () => {
   const source=fs.readFileSync(path.join(__dirname,'../static/app.js'),'utf8');
   assert.match(source,/Por concurso \(crescente\)/);
@@ -355,6 +398,96 @@ test('ordena concursos históricos do mais recente para o mais antigo e sinaliza
   assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify(resultsHistoryNavigation(history,page))',context)),{latest:false,newer:false,older:true});
   context.history.index=2; context.page.next_before=null;
   assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify(resultsHistoryNavigation(history,page))',context)),{latest:true,newer:true,older:false});
+});
+
+test('histórico permite retry de Mais recentes e preserva cursores até a primeira página carregar', async () => {
+  const jsonResponse=payload=>({ok:true,status:200,headers:{get:()=> 'application/json'},json:async()=>payload});
+  const calls=[];
+  let attempt=0;
+  const fetchImpl=async(url)=>{
+    calls.push(url); attempt++;
+    if(attempt<3) throw new Error('offline');
+    return jsonResponse({items:[{contest:200,draw_date:'01/01/2026',numbers:[1,2,3,4,5,6],second_numbers:[],trevos:[],estimated_prize:0}],from_contest:200,to_contest:200,next_before:null,missing_contests:[],provenance:{recently_checked:true,latest_lookup:'server_fetch'}});
+  };
+  const latest={disabled:false},newer={disabled:false},older={disabled:false};
+  const {context,elements}=frontend({
+    '#history-table':{innerHTML:''},'#history-count':{textContent:''},'#history-range':{textContent:''},
+    '[data-action="results-latest"]':latest,'[data-action="results-newer"]':newer,'[data-action="results-older"]':older,
+  },null,fetchImpl);
+  const buttons=[elements['[data-action="results-latest"]'],elements['[data-action="results-newer"]'],elements['[data-action="results-older"]']];
+  context.document.querySelectorAll=selector=>selector==='[data-action^="results-"]'?buttons:[];
+  const history={game:'lotofacil',limit:100,cursors:[null],index:0,page:null,requestId:0,isLoading:false};
+  context.history=history;
+  vm.runInContext("state.catalog=[{key:'lotofacil',digits:2,min_pick:15,max_pick:20,pick_size:15,range:{minimum:1,maximum:25}}];state.game='lotofacil';state.page='results';state.resultsHistory=history;",context);
+
+  vm.runInContext("navigateResultsHistory('results-latest')",context);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(calls.length,1);
+  assert.equal(history.page,null);
+  assert.equal(history.isLoading,false);
+  assert.equal(elements['[data-action="results-latest"]'].disabled,false);
+
+  const olderPage={items:[],next_before:25};
+  history.cursors=[null,101,51]; history.index=2; history.page=olderPage;
+  vm.runInContext("navigateResultsHistory('results-latest')",context);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(history.cursors,[null,101,51]);
+  assert.equal(history.page,olderPage);
+  assert.equal(history.isLoading,false);
+
+  vm.runInContext("navigateResultsHistory('results-latest')",context);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(calls.length,3);
+  assert.equal(calls[2].includes('&before='),false);
+  assert.equal(history.index,0);
+  assert.deepEqual(JSON.parse(JSON.stringify(history.cursors)),[null]);
+  assert.equal(history.page.from_contest,200);
+  assert.equal(history.isLoading,false);
+});
+
+test('fechar a sidebar móvel devolve o foco ao botão somente quando necessário', () => {
+  let open=true,focusCalls=0;
+  const focusedLink={};
+  const outside={};
+  const sidebar={classList:{contains:name=>name==='open'&&open,remove:name=>{if(name==='open')open=false;}},contains:element=>element===focusedLink};
+  const {context}=frontend({'#sidebar':sidebar,'#menu-toggle':{focus(){focusCalls++;}}});
+  context.document.activeElement=focusedLink;
+  vm.runInContext('closeMobileSidebar()',context);
+  assert.equal(open,false);
+  assert.equal(focusCalls,1);
+  open=true;
+  context.document.activeElement=outside;
+  vm.runInContext('closeMobileSidebar()',context);
+  assert.equal(open,false);
+  assert.equal(focusCalls,1);
+
+  const styles=fs.readFileSync(path.join(__dirname,'../static/app.css'),'utf8');
+  assert.match(styles,/\.sidebar\{[^}]*position:fixed[^}]*visibility:hidden/);
+  assert.match(styles,/\.sidebar\.open\{[^}]*visibility:visible/);
+});
+
+test('textos pequenos mantêm contraste mínimo WCAG AA nos fundos claros e escuros', () => {
+  const styles=fs.readFileSync(path.join(__dirname,'../static/app.css'),'utf8');
+  const color=(selector)=>{
+    const match=styles.match(new RegExp(`${selector}\\{[^}]*color:(#[0-9a-f]{3,6})`,'i'));
+    assert.ok(match,`não encontrou a cor de ${selector}`);
+    return match[1];
+  };
+  const rgb=hex=>{
+    let digits=hex.slice(1);
+    if(digits.length===3) digits=[...digits].map(digit=>digit+digit).join('');
+    return [0,2,4].map(index=>parseInt(digits.slice(index,index+2),16)/255);
+  };
+  const luminance=hex=>rgb(hex).map(value=>value<=0.04045?value/12.92:((value+0.055)/1.055)**2.4).reduce((sum,value,index)=>sum+value*[0.2126,0.7152,0.0722][index],0);
+  const contrast=(foreground,background)=>{
+    const values=[luminance(foreground),luminance(background)].sort((a,b)=>b-a);
+    return (values[0]+0.05)/(values[1]+0.05);
+  };
+  const fieldHelp=color('\\.field-help'),smallNote=color('\\.small-note'),darkSmallNote=color('\\.result-card \\.small-note');
+  assert.ok(contrast(fieldHelp,'#fff')>=4.5);
+  assert.ok(contrast(smallNote,'#fff')>=4.5);
+  assert.ok(contrast(smallNote,'#f5f7f4')>=4.5);
+  assert.ok(contrast(darkSmallNote,'#153a2b')>=4.5);
 });
 
 test('tela de resultados consome o histórico paginado e informa lacunas', () => {
@@ -436,6 +569,37 @@ test('edição de qualquer campo da contagem marca a resposta como desatualizada
   const source=fs.readFileSync(path.join(__dirname,'../static/app.js'),'utf8');
   assert.match(source,/\['#combination-picks','#combination-fixed','#combination-removed'\]\.forEach\(selector=>\$\(selector\)\.addEventListener\('input',markCombinationCountStale\)\)/);
   assert.match(source,/request!==combinationCountRequest/);
+});
+
+test('gerador ignora resposta antiga que chega depois da solicitação mais recente', async () => {
+  const pending=[];
+  const fetchImpl=(url,options={})=>new Promise((resolve,reject)=>pending.push({url,options,resolve,reject}));
+  const {context,elements}=frontend({'#game-count':'1','#generated-output':{innerHTML:''}},null,fetchImpl);
+  vm.runInContext("state.catalog=[{key:'megasena',name:'Mega-Sena',digits:2,min_pick:6,max_pick:20,pick_size:6,range:{minimum:1,maximum:60}}];state.game='megasena';state.page='generator';",context);
+  const older=vm.runInContext('handleGenerate({preventDefault(){}})',context);
+  const newer=vm.runInContext('handleGenerate({preventDefault(){}})',context);
+  assert.equal(pending.length,2);
+  const response=ticketNumber=>({
+    ok:true,status:200,headers:{get:()=> 'application/json'},
+    json:async()=>({items:[{numbers:[1,2,3,4,5,ticketNumber],ticket_number:ticketNumber,sum:21,even_count:2,odd_count:4,repeated_from_latest:0,probability:{event:'6 acertos',one_in:50063860}}],disclaimer:'Teste.'}),
+  });
+  pending[1].resolve(response(2));
+  await newer;
+  pending[0].resolve(response(1));
+  await older;
+  assert.equal(vm.runInContext('state.generated[0].ticket_number',context),2);
+  assert.match(elements['#generated-output'].innerHTML,/Jogo 2/);
+  assert.doesNotMatch(elements['#generated-output'].innerHTML,/Jogo 1/);
+
+  const staleFailure=vm.runInContext('handleGenerate({preventDefault(){}})',context);
+  const current=vm.runInContext('handleGenerate({preventDefault(){}})',context);
+  pending[3].resolve(response(3));
+  await current;
+  pending[2].reject(new Error('falha de solicitação obsoleta'));
+  await staleFailure;
+  assert.equal(vm.runInContext('state.generated[0].ticket_number',context),3);
+  assert.match(elements['#generated-output'].innerHTML,/Jogo 3/);
+  assert.doesNotMatch(elements['#generated-output'].innerHTML,/falha de solicitação obsoleta/);
 });
 
 test('gerador expõe dezenas de 6 a 12 e limites de 2 a 6 trevos', async () => {

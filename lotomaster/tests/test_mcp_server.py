@@ -22,22 +22,40 @@ TOKEN = "test-only-mcp-token-0123456789-abcdefghijklmnopqrstuvwxyz"
 class MCPHTTPTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls._old_token = os.environ.get("LOTOMASTER_MCP_BEARER_TOKEN")
+        cls._env_keys = (
+            "LOTOMASTER_MCP_BEARER_TOKEN",
+            "LOTOMASTER_MCP_ALLOWED_HOSTS",
+            "LOTOMASTER_MCP_ALLOWED_ORIGINS",
+        )
+        cls._old_environment = {key: os.environ.get(key) for key in cls._env_keys}
+        cls.addClassCleanup(cls._restore_environment)
         os.environ["LOTOMASTER_MCP_BEARER_TOKEN"] = TOKEN
+        os.environ["LOTOMASTER_MCP_ALLOWED_HOSTS"] = "127.0.0.1,localhost"
+        os.environ["LOTOMASTER_MCP_ALLOWED_ORIGINS"] = "http://127.0.0.1,http://localhost"
         cls.server = mcp_server.BoundedMCPHTTPServer(("127.0.0.1", 0), mcp_server.MCPHandler)
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
-        cls.thread.start()
+        try:
+            cls.thread.start()
+        except Exception:
+            cls.server.server_close()
+            raise
+        cls.addClassCleanup(cls._close_server)
         cls.host, cls.port = cls.server.server_address
 
     @classmethod
-    def tearDownClass(cls):
-        cls.server.shutdown()
+    def _restore_environment(cls):
+        for key, value in cls._old_environment.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    @classmethod
+    def _close_server(cls):
+        if cls.thread.is_alive():
+            cls.server.shutdown()
         cls.server.server_close()
         cls.thread.join(timeout=2)
-        if cls._old_token is None:
-            os.environ.pop("LOTOMASTER_MCP_BEARER_TOKEN", None)
-        else:
-            os.environ["LOTOMASTER_MCP_BEARER_TOKEN"] = cls._old_token
 
     def post(self, payload, *, token=TOKEN, origin=None, accept="application/json, text/event-stream", version=None):
         connection = http.client.HTTPConnection(self.host, self.port, timeout=5)
@@ -93,31 +111,33 @@ class MCPHTTPTests(unittest.TestCase):
 
         status, _, _ = self.post(payload)
         self.assertEqual(status, 200)
-        status, _, _ = self.post(payload, version=mcp_server.MCP_PROTOCOL_VERSION)
+        status, _, _ = self.post(payload, version=mcp_server.HTTP_PROTOCOL_VERSION)
         self.assertEqual(status, 200)
+        status, _, _ = self.post(payload, version="2024-11-05")
+        self.assertEqual(status, 400)
 
         status, _, _ = self.get(version="2099-01-01")
         self.assertEqual(status, 400)
         status, _, _ = self.get()
         self.assertEqual(status, 405)
-        status, _, _ = self.get(version=mcp_server.MCP_PROTOCOL_VERSION)
+        status, _, _ = self.get(version=mcp_server.HTTP_PROTOCOL_VERSION)
         self.assertEqual(status, 405)
 
     def test_initialize_tools_and_notification(self):
         status, _, body = self.post({
             "jsonrpc": "2.0", "id": 7, "method": "initialize",
-            "params": {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}},
+            "params": {"protocolVersion": mcp_server.HTTP_PROTOCOL_VERSION, "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}},
         })
         self.assertEqual(status, 200)
         initialize = json.loads(body)["result"]
-        self.assertEqual(initialize["protocolVersion"], "2024-11-05")
+        self.assertEqual(initialize["protocolVersion"], mcp_server.HTTP_PROTOCOL_VERSION)
         self.assertIn("tools", initialize["capabilities"])
         status, _, body = self.post({
             "jsonrpc": "2.0", "id": 9, "method": "initialize",
             "params": {"protocolVersion": ["invalid"]},
         })
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["result"]["protocolVersion"], mcp_server.MCP_PROTOCOL_VERSION)
+        self.assertEqual(json.loads(body)["result"]["protocolVersion"], mcp_server.HTTP_PROTOCOL_VERSION)
         status, _, body = self.post({"jsonrpc": "2.0", "id": 8, "method": "tools/list"})
         self.assertEqual(status, 200)
         names = {tool["name"] for tool in json.loads(body)["result"]["tools"]}
@@ -129,6 +149,35 @@ class MCPHTTPTests(unittest.TestCase):
         status, _, body = self.post({"jsonrpc": "2.0", "method": "notifications/initialized"})
         self.assertEqual(status, 202)
         self.assertEqual(body, b"")
+
+    def test_streamable_http_initialize_then_tool_call_uses_negotiated_version(self):
+        status, _, body = self.post({
+            "jsonrpc": "2.0", "id": "init-1", "method": "initialize",
+            "params": {"protocolVersion": mcp_server.HTTP_PROTOCOL_VERSION, "capabilities": {}, "clientInfo": {"name": "test-client", "version": "1"}},
+        }, version=mcp_server.HTTP_PROTOCOL_VERSION)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["result"]["protocolVersion"], mcp_server.HTTP_PROTOCOL_VERSION)
+        status, _, body = self.post({"jsonrpc": "2.0", "id": "tool-1", "method": "tools/call", "params": {"name": "lottery_catalog", "arguments": {}}}, version=mcp_server.HTTP_PROTOCOL_VERSION)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["id"], "tool-1")
+        self.assertEqual(json.loads(body)["result"]["isError"], False)
+
+    def test_http_surrogate_ids_are_rejected_and_surrogate_results_are_escaped(self):
+        status, _, body = self.post({"jsonrpc": "2.0", "id": "\ud800", "method": "ping"})
+        self.assertEqual(status, 200)
+        invalid = json.loads(body)
+        self.assertIsNone(invalid["id"])
+        self.assertEqual(invalid["error"]["code"], -32600)
+
+        with patch.object(mcp_server, "_tool_result", return_value={"value": "\ud800"}):
+            status, _, body = self.post({
+                "jsonrpc": "2.0", "id": "ação", "method": "tools/call",
+                "params": {"name": "lottery_catalog", "arguments": {}},
+            })
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["id"], "ação")
+        self.assertEqual(json.loads(body)["result"]["structuredContent"]["value"], "\ud800")
+        body.decode("ascii")
 
     def test_analysis_and_probability_tools(self):
         status, _, body = self.post({
@@ -164,13 +213,23 @@ class MCPHTTPTests(unittest.TestCase):
         status, _, _ = self.post({"jsonrpc": "2.0", "id": 1, "method": "ping"}, token="é" + "a" * 40)
         self.assertEqual(status, 401)
 
-    def test_initialize_does_not_negotiate_batching_protocol_versions(self):
-        for requested in ("2025-03-26", "2025-06-18", "2025-11-25"):
+    def test_initialize_selects_streamable_http_revision_and_preserves_stdio_revisions(self):
+        for requested in ("2024-11-05", "2025-03-26", "2025-11-25"):
             response = mcp_server._dispatch({
                 "jsonrpc": "2.0", "id": 19, "method": "initialize",
                 "params": {"protocolVersion": requested},
             }, transport="http")
-            self.assertEqual(response["result"]["protocolVersion"], "2024-11-05")
+            self.assertEqual(response["result"]["protocolVersion"], mcp_server.HTTP_PROTOCOL_VERSION)
+        stdio = mcp_server._dispatch({
+            "jsonrpc": "2.0", "id": 20, "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05"},
+        }, transport="stdio")
+        self.assertEqual(stdio["result"]["protocolVersion"], "2024-11-05")
+
+        stdio_default = mcp_server._dispatch({
+            "jsonrpc": "2.0", "id": 21, "method": "initialize", "params": {},
+        }, transport="stdio")
+        self.assertEqual(stdio_default["result"]["protocolVersion"], mcp_server.MCP_PROTOCOL_VERSION)
     def test_http_rejects_invalid_request_ids_and_handles_recursion(self):
         for invalid in (None, True, 1.5, [], {}):
             with self.subTest(invalid=invalid):
@@ -213,9 +272,25 @@ class MCPReadOnlyTests(unittest.TestCase):
             root = Path(directory)
             (root / "lotomaster").mkdir()
             (root / "lotomaster" / "valid.py").write_text("x = 1\n", encoding="utf-8")
-            with patch.object(mcp_server, "REPO_ROOT", root):
-                tree = compile("x = 1\n", "valid.py", "exec", __import__("ast").PyCF_ONLY_AST, dont_inherit=True)
-                self.assertIsNotNone(tree)
+            checks_called = []
+
+            def pass_unrelated_check(label, *_args, **_kwargs):
+                checks_called.append(label)
+                return {"check": label, "passed": True}
+
+            with (
+                patch.object(mcp_server, "REPO_ROOT", root),
+                patch.object(mcp_server, "_assert_branch_edit_access", return_value=mcp_server.EDITABLE_BRANCH),
+                patch.object(mcp_server, "_working_tree_fingerprint", return_value="stable"),
+                patch.object(mcp_server, "_project_file_index", return_value=[{"path": "lotomaster/valid.py"}]),
+                patch.object(mcp_server, "_run_fixed_check", side_effect=pass_unrelated_check),
+            ):
+                result = mcp_server._run_branch_checks("stdio")
+            syntax = next(check for check in result["checks"] if check["check"] == "python_syntax")
+            self.assertTrue(syntax["passed"])
+            self.assertEqual(syntax["files_checked"], 1)
+            self.assertTrue(result["all_passed"])
+            self.assertTrue(checks_called)
             self.assertFalse(list(root.rglob("*.pyc")))
     def test_read_project_file_omits_digest_without_edit_authorization(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -377,6 +452,18 @@ class MCPReadOnlyTests(unittest.TestCase):
         self.assertIn('description = "ordinary text"', content)
         self.assertIn("[REDACTED]", content)
 
+    def test_carriage_return_inside_secret_keeps_following_source_line_number(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = 'api_key = "first-secret\rsecond-secret"\rafter_secret\r'
+            (root / "app.py").write_bytes(source.encode("utf-8"))
+            with patch.object(mcp_server, "REPO_ROOT", root):
+                result = mcp_server._tool_result("read_project_file", {"path": "app.py"})
+        self.assertNotIn("first-secret", result["content"])
+        self.assertNotIn("second-secret", result["content"])
+        self.assertEqual(result["total_lines"], 3)
+        self.assertIn("3: after_secret", result["content"])
+
     def test_redaction_handles_repeated_private_key_markers_without_backtracking(self):
         complete = "-----BEGIN RSA PRIVATE KEY-----\nsecret material\n-----END RSA PRIVATE KEY-----"
         redacted = mcp_server._redact_sensitive_text(complete)
@@ -495,6 +582,24 @@ class MCPReadOnlyTests(unittest.TestCase):
         self.assertEqual(responses[0]["result"]["serverInfo"]["name"], "lotomaster-mcp")
         self.assertEqual(len(responses[1]["result"]["tools"]), 9)
 
+    def test_stdio_invalid_utf8_frame_does_not_block_next_request(self):
+        request = json.dumps({
+            "jsonrpc": "2.0", "id": "ação", "method": "tools/call",
+            "params": {"name": "lottery_catalog", "arguments": {}},
+        }, ensure_ascii=False).encode("utf-8")
+        output = io.StringIO()
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            mcp_server, "_tool_result", return_value={"value": "\ud800"},
+        ):
+            mcp_server.serve_stdio(io.BytesIO(b"\xff\n" + request + b"\n"), output)
+        responses = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(len(responses), 2)
+        self.assertEqual(responses[0]["error"]["code"], -32700)
+        self.assertIsNone(responses[0]["id"])
+        self.assertEqual(responses[1]["id"], "ação")
+        self.assertEqual(responses[1]["result"]["structuredContent"]["value"], "\ud800")
+        output.getvalue().encode("ascii")
+
     def test_stdio_default_streams_are_configured_as_utf8(self):
         class FakeStream:
             def __init__(self, input_text=""):
@@ -605,6 +710,27 @@ class MCPBranchEditTests(unittest.TestCase):
         self._git(root, "add", "lotomaster/script.py")
         self._git(root, "commit", "-q", "-m", "base")
         return temporary, root, target
+
+    def test_authorized_digest_is_available_for_safe_file_outside_capped_listing(self):
+        temporary, root, _ = self._repo()
+        self.addCleanup(temporary.cleanup)
+        target = root / "lotomaster" / "z" / "eligible.py"
+        target.parent.mkdir()
+        raw = b"safe content\n"
+        target.write_bytes(raw)
+        with (
+            patch.object(mcp_server, "REPO_ROOT", root),
+            patch.object(mcp_server, "_project_file_index", return_value=[]),
+            patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"}),
+        ):
+            authorized = mcp_server._tool_result(
+                "read_project_file", {"path": "lotomaster/z/eligible.py"}, transport="stdio",
+            )
+            with self.assertRaisesRegex(ValueError, "conjunto permitido"):
+                mcp_server._tool_result(
+                    "read_project_file", {"path": "lotomaster/z/eligible.py"}, transport="http",
+                )
+        self.assertEqual(authorized["sha256"], hashlib.sha256(raw).hexdigest())
 
     def test_edit_tools_are_opt_in_and_stdio_only(self):
         with patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "0"}):
@@ -759,6 +885,26 @@ class MCPBranchEditTests(unittest.TestCase):
         self.assertIn("tracked preimage", review["diff"])
         self.assertIn("staged version", review["diff"])
         self.assertIn("working-tree version", review["diff"])
+
+    def test_review_detects_owner_execute_removal_with_staged_content(self):
+        temporary, root, target = self._repo()
+        self.addCleanup(temporary.cleanup)
+        target.chmod(0o755)
+        self._git(root, "add", "lotomaster/script.py")
+        self._git(root, "commit", "-q", "-m", "make module executable")
+        target.write_text("staged content\n", encoding="utf-8")
+        self._git(root, "add", "lotomaster/script.py")
+        target.chmod(0o655)
+        with patch.object(mcp_server, "REPO_ROOT", root), patch.dict(
+            os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"},
+        ):
+            review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
+        self.assertEqual(review["staged_files"], ["lotomaster/script.py"])
+        self.assertEqual(review["changed_files"], ["lotomaster/script.py"])
+        self.assertIn("staged content", review["diff"])
+        self.assertIn("old mode 100755", review["diff"])
+        self.assertIn("new mode 100644", review["diff"])
+        self.assertTrue(review["diff_complete"])
 
     def test_review_keeps_staged_addition_deleted_from_working_tree(self):
         temporary, root, _ = self._repo()

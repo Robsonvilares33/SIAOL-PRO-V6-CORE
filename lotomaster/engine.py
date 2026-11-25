@@ -34,6 +34,8 @@ def _fetch_and_save_gap(key: str, contest: int) -> None:
         storage.save_draw(draw)
     except Exception:
         logger.debug("Não foi possível preencher o concurso %s de %s", contest, key)
+    finally:
+        _gap_fill_slots.release()
 
 
 def _fill_missing_draws(key: str, contests: list[int]) -> None:
@@ -51,7 +53,7 @@ def _fill_missing_draws(key: str, contests: list[int]) -> None:
             except Exception:
                 _gap_fill_slots.release()
                 raise
-            future.add_done_callback(lambda _future: _gap_fill_slots.release())
+            future.add_done_callback(lambda done: _gap_fill_slots.release() if done.cancelled() else None)
             pending.add(future)
         if not pending:
             break

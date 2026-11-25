@@ -46,6 +46,15 @@ vm.runInContext(fs.readFileSync(path.join(staticDir, 'caixa-fallback.js'), 'utf8
   assert.equal(partial.expected_count,3);
   assert.equal(partial.count,2);
   assert.equal(partial.warning,null);
+  missingHistorical=false;
+  const narrow=await fallback('/megasena/results?limit=1');
+  assert.deepEqual(Array.from(narrow.items,x=>x.contest),[100]);
+  const retained=JSON.parse(cache.get('lotomaster:caixa:history:megasena'));
+  assert.deepEqual(retained.map(x=>x.contest),[100,98]);
+  missingHistorical=true;
+  const widerAfterNarrow=await fallback('/megasena/results?limit=3');
+  assert.deepEqual(Array.from(widerAfterNarrow.items,x=>x.contest),[100,98]);
+  assert.equal(widerAfterNarrow.partial,true);
   const appSource=fs.readFileSync(path.join(staticDir,'app.js'),'utf8');
   // Exercise the actual simulator rendering in a minimal DOM.
   const result = {innerHTML:''};

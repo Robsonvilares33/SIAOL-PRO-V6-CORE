@@ -3,6 +3,7 @@
   'use strict';
 
   const STORAGE_KEY = 'lotomaster.ai.config.v1';
+  const REQUEST_TIMEOUT_MS = 30_000;
   const providers = {
     'openai-responses': {
       label: 'OpenAI Responses API (GPT-6 Astra)',
@@ -83,9 +84,8 @@
   function validateEndpoint(endpoint) {
     let parsed;
     try { parsed = new URL(endpoint); } catch (_) { throw new Error('A URL da API não é válida.'); }
-    const localHttp = parsed.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname);
-    if (parsed.protocol !== 'https:' && !localHttp) {
-      throw new Error('Use um endpoint HTTPS. HTTP só é permitido para serviços locais de desenvolvimento.');
+    if (parsed.protocol !== 'https:') {
+      throw new Error('Use HTTPS; a chave da API não é enviada por conexões HTTP, inclusive para serviços locais.');
     }
   }
 
@@ -150,14 +150,37 @@
       throw new Error('Protocolo de API não suportado.');
     }
 
-    let response;
+    let response, raw;
+    const requestController=new AbortController();
+    let callerAborted=false, timedOut=false, rejectDeadline;
+    const deadline=new Promise((_,reject)=>{rejectDeadline=reject;});
+    const onCallerAbort=()=>{callerAborted=true;requestController.abort();};
+    if (signal) {
+      if (signal.aborted) onCallerAbort();
+      else signal.addEventListener('abort',onCallerAbort,{once:true});
+    }
+    const timeout=setTimeout(()=>{
+      timedOut=true;
+      requestController.abort();
+      rejectDeadline(new Error('timeout'));
+    },REQUEST_TIMEOUT_MS);
     try {
-      response = await fetch(endpoint, {method:'POST',headers,body:JSON.stringify(body),credentials:'omit',cache:'no-store',redirect:'error',signal});
+      const fetchAndRead=async()=>{
+        const result=await fetch(endpoint,{method:'POST',headers,body:JSON.stringify(body),credentials:'omit',cache:'no-store',redirect:'error',signal:requestController.signal});
+        return {response:result,raw:await result.text()};
+      };
+      ({response,raw}=await Promise.race([fetchAndRead(),deadline]));
     } catch (error) {
+      if (callerAborted || signal?.aborted) {
+        const canceled=new Error('A solicitação foi cancelada.'); canceled.name='AbortError'; throw canceled;
+      }
+      if (timedOut) throw new Error('A solicitação ao provedor excedeu o tempo limite de 30 segundos.');
       if (error?.name === 'AbortError') throw error;
       throw new Error('Não foi possível acessar o endpoint. Verifique a URL, a conexão e se o provedor aceita CORS no navegador.');
+    } finally {
+      clearTimeout(timeout);
+      signal?.removeEventListener('abort',onCallerAbort);
     }
-    const raw = await response.text();
     let payload;
     try { payload = JSON.parse(raw); } catch (_) { payload = {message:raw.slice(0,600)}; }
     if (!response.ok) {
@@ -259,6 +282,10 @@
 ${JSON.stringify(trustedData)}`;
     const studyGuardrail = 'Não reexecute, ajuste, recalibre nem declare validação de estudos pré-existentes. H-ANOMALY-001 permanece congelada e somente prospectiva; observações exploratórias nesta tela não são um teste desse protocolo.';
     const payload = await providerRequest(config, `${system} ${studyGuardrail}`, prompt, false, signal);
+    if (config.provider==='openai-responses' && payload.status==='incomplete') {
+      const reason=payload.incomplete_details?.reason;
+      throw new Error(`A resposta da OpenAI ficou incompleta${reason?` (${reason})`:''}; tente novamente com um recorte menor.`);
+    }
     const text = responseText(config, payload);
     if (!text) throw new Error('O provedor não retornou uma resposta textual.');
     const result = parseStructured(text);

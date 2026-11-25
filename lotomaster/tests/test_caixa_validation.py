@@ -116,6 +116,7 @@ class CaixaValidationTests(unittest.TestCase):
 
     def test_invalid_caixa_response_cannot_be_saved_as_official_result(self):
         with (
+            patch.dict("lotomaster.engine._latest_cache", clear=True),
             patch("lotomaster.engine.storage.latest_draw", return_value=None),
             patch("lotomaster.engine.fetch_draw", side_effect=ValueError("resultado inválido")),
             patch("lotomaster.engine.storage.save_draw") as save,

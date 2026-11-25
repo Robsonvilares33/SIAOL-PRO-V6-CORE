@@ -84,6 +84,23 @@ class ServerAssistantSafetyTests(unittest.TestCase):
                 )
                 self.assertEqual(response.status_code, 503)
 
+    def test_valid_length_access_token_equal_to_provider_key_is_rejected(self):
+        shared = "A" * 40
+        env = {
+            "GEMINI_API_KEY": shared,
+            "LOTOMASTER_ENABLE_SERVER_GEMINI": "true",
+            "LOTOMASTER_SERVER_GEMINI_TOKEN": shared,
+        }
+        with patch.dict("os.environ", env, clear=True), \
+             patch("lotomaster.api.build_assistant_report") as build, \
+             patch("lotomaster.api.list_results", return_value=[self.draw]):
+            response = self.client.get(
+                "/api/v1/megasena/assistant?use_gemini=true",
+                headers={"Authorization": f"Bearer {shared}"},
+            )
+        self.assertEqual(response.status_code, 503)
+        build.assert_not_called()
+
     def test_model_response_has_independent_disclaimer(self):
         response = Mock()
         response.json.return_value = {"candidates": [{"content": {"parts": [{"text": "Interpretação do modelo."}]}}]}

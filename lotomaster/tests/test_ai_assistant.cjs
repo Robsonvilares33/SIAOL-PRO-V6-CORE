@@ -8,7 +8,7 @@ const vm = require('node:vm');
 const appSource = fs.readFileSync(path.join(__dirname, '../static/app.js'), 'utf8');
 const aiSource = fs.readFileSync(path.join(__dirname, '../static/ai-assistant.js'), 'utf8');
 
-function loadAi(fetchImpl = async () => { throw new Error('fetch inesperado'); }) {
+function loadAi(fetchImpl = async () => { throw new Error('fetch inesperado'); }, timerApi = {}) {
   const storage = {getItem: () => null, setItem() {}, removeItem() {}};
   const context = vm.createContext({
     window: {},
@@ -16,6 +16,9 @@ function loadAi(fetchImpl = async () => { throw new Error('fetch inesperado'); }
     sessionStorage: storage,
     localStorage: storage,
     URL,
+    AbortController,
+    setTimeout: timerApi.setTimeout || setTimeout,
+    clearTimeout: timerApi.clearTimeout || clearTimeout,
     fetch: fetchImpl,
   });
   vm.runInContext(aiSource, context);
@@ -216,7 +219,7 @@ test('modelo recebe a contagem combinatória exata e o escopo correto sem chamad
   assert.match(body.instructions, /contagens inteiras pré-calculadas/);
 });
 
-test('sinal de cancelamento é propagado à chamada HTTP do provedor', async () => {
+test('a chamada HTTP usa um sinal composto em vez de substituir o sinal de consentimento', async () => {
   let receivedSignal;
   const context = loadAi(async (url, options) => {
     receivedSignal = options.signal;
@@ -226,7 +229,60 @@ test('sinal de cancelamento é propagado à chamada HTTP do provedor', async () 
   const config = {provider:'openai-responses',endpoint:'https://api.openai.com/v1/responses',model:'local-test',key:'test-only'};
   const spec = {key:'megasena',name:'Mega-Sena',pick_size:6,range:{minimum:1,maximum:60}};
   await context.window.LotoMasterAI.analyze(config,spec,{},[],{complete:true,periodLabel:'teste'},null,controller.signal);
-  assert.equal(receivedSignal, controller.signal);
+  assert.ok(receivedSignal instanceof AbortSignal);
+  assert.notEqual(receivedSignal, controller.signal);
+});
+
+test('retirar o consentimento aborta a requisição composta do provedor', async () => {
+  let receivedSignal;
+  const context=loadAi((_url,options)=>new Promise((resolve,reject)=>{
+    receivedSignal=options.signal;
+    options.signal.addEventListener('abort',()=>{const error=new Error('aborted');error.name='AbortError';reject(error);},{once:true});
+  }));
+  const controller=new AbortController();
+  const config={provider:'openai-responses',endpoint:'https://api.openai.com/v1/responses',model:'local-test',key:'test-only'};
+  const spec={key:'megasena',name:'Mega-Sena',pick_size:6,range:{minimum:1,maximum:60}};
+  const pending=context.window.LotoMasterAI.analyze(config,spec,{},[],{complete:true,periodLabel:'teste'},null,controller.signal);
+  await new Promise(resolve=>setImmediate(resolve));
+  controller.abort();
+  assert.equal(receivedSignal.aborted,true);
+  await assert.rejects(pending,error=>error.name==='AbortError');
+});
+
+test('timeout aborta também a leitura do corpo e informa expiração distinta', async () => {
+  let expire, receivedSignal, bodyRead=false;
+  const context=loadAi(async (_url,options)=>{
+    receivedSignal=options.signal;
+    return {ok:true,status:200,text:()=>{bodyRead=true;return new Promise(()=>{});}};
+  },{
+    setTimeout:(callback,delay)=>{assert.equal(delay,30_000);expire=callback;return 1;},
+    clearTimeout:()=>{},
+  });
+  const config={provider:'openai-responses',endpoint:'https://api.openai.com/v1/responses',model:'local-test',key:'test-only'};
+  const pending=context.window.LotoMasterAI.testConnection(config);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(bodyRead,true);
+  expire();
+  assert.equal(receivedSignal.aborted,true);
+  await assert.rejects(pending,/excedeu o tempo limite de 30 segundos/);
+});
+
+test('não envia chave por endpoint HTTP loopback', async () => {
+  let requests=0;
+  const context=loadAi(async()=>{requests++;return {ok:true,status:200,text:async()=>'{"output_text":"OK"}'};});
+  const config={provider:'openai-responses',endpoint:'http://127.0.0.1:8123/v1/responses',model:'local-test',key:'provider-secret'};
+  await assert.rejects(context.window.LotoMasterAI.testConnection(config),/Use HTTPS/);
+  assert.equal(requests,0);
+});
+
+test('resposta OpenAI Responses incompleta não é tratada como análise concluída', async () => {
+  const context=loadAi(async()=>({
+    ok:true,status:200,
+    text:async()=>JSON.stringify({status:'incomplete',incomplete_details:{reason:'max_output_tokens'},output_text:'{"analysis":"texto parcial'}),
+  }));
+  const config={provider:'openai-responses',endpoint:'https://api.openai.com/v1/responses',model:'local-test',key:'test-only'};
+  const spec={key:'megasena',name:'Mega-Sena',pick_size:6,range:{minimum:1,maximum:60}};
+  await assert.rejects(context.window.LotoMasterAI.analyze(config,spec,{},[],{complete:true},null),/incompleta.*max_output_tokens/);
 });
 
 

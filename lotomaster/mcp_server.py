@@ -47,7 +47,9 @@ from .engine import simulate_ticket_history, ticket_probability
 MCP_PATH = "/mcp"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MCP_PROTOCOL_VERSION = "2024-11-05"
-SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05"}
+HTTP_PROTOCOL_VERSION = "2025-06-18"
+SUPPORTED_PROTOCOL_VERSIONS = {MCP_PROTOCOL_VERSION, HTTP_PROTOCOL_VERSION}
+HTTP_SUPPORTED_PROTOCOL_VERSIONS = {HTTP_PROTOCOL_VERSION}
 MAX_BODY_BYTES = 1_048_576
 MAX_HISTORY_PAGE = 500
 MAX_ANALYSIS_DRAWS = 300
@@ -399,7 +401,7 @@ def _redact_sensitive_key_values(text: str) -> str:
         output.append(text[cursor:value_start])
         if quote:
             output.append(f"{delimiter}[REDACTED]" + ("" if malformed_quote else delimiter))
-            output.append("\n" * text[value_start:value_end].count("\n"))
+            output.extend(re.findall(r"\r\n|\r|\n|\v|\f|\x1c|\x1d|\x1e|\x85|\u2028|\u2029", text[value_start:value_end]))
         else:
             output.append("[REDACTED]")
         cursor = value_end
@@ -536,8 +538,17 @@ def _read_project_file(arguments: dict[str, Any], *, transport: str = "") -> dic
     max_lines = _require_int(arguments.get("max_lines", 200), "max_lines", 1, 400)
     try:
         raw = _read_project_file_bytes(relative)
+        editable_path = _is_editable_branch_path(relative.as_posix())
+        edit_authorized = False
+        if editable_path:
+            try:
+                _assert_branch_edit_access(transport)
+            except ValueError:
+                pass
+            else:
+                edit_authorized = True
         listed = {item["path"] for item in _project_file_index()}
-        if relative.as_posix() not in listed:
+        if relative.as_posix() not in listed and not edit_authorized:
             raise ValueError("Esse arquivo não está no conjunto permitido de leitura.")
         if b"\x00" in raw:
             raise ValueError("Arquivo binário não pode ser lido por esta ferramenta.")
@@ -560,13 +571,8 @@ def _read_project_file(arguments: dict[str, Any], *, transport: str = "") -> dic
         "content_is_untrusted_data": True,
         "secrets_redacted": True,
     }
-    if _is_editable_branch_path(result["path"]):
-        try:
-            _assert_branch_edit_access(transport)
-        except ValueError:
-            pass
-        else:
-            result["sha256"] = hashlib.sha256(raw).hexdigest()
+    if edit_authorized:
+        result["sha256"] = hashlib.sha256(raw).hexdigest()
     return result
 
 
@@ -1568,7 +1574,7 @@ def _index_worktree_differs(
         return True
     index_version = _tree_version_signature(index_source, indexed=True)
     index_mode = index_version[0] if index_version is not None else "100644"
-    worktree_mode = "100755" if worktree_source[0][2] & 0o111 else "100644"
+    worktree_mode = "100755" if worktree_source[0][2] & stat.S_IXUSR else "100644"
     return index_mode != worktree_mode or index_source[1] != worktree_source[1]
 
 
@@ -1712,7 +1718,7 @@ def _render_unstaged_diff_from_snapshot(
                     target = worktree.joinpath(*path.split("/"))
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(worktree_source[1])
-                    mode = 0o755 if worktree_source[0][2] & 0o111 else 0o644
+                    mode = 0o755 if worktree_source[0][2] & stat.S_IXUSR else 0o644
                     target.chmod(mode)
 
             if index_info:
@@ -2212,6 +2218,13 @@ def _jsonrpc_error(request_id: Any, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 
+def _serialize_jsonrpc(response: dict[str, Any]) -> str:
+    try:
+        return json.dumps(response, ensure_ascii=True, separators=(",", ":"))
+    except (TypeError, ValueError, RecursionError):
+        return '{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"Internal error"}}'
+
+
 def _available_tools(transport: str) -> list[dict[str, Any]]:
     if not _branch_edit_enabled(transport):
         return TOOLS
@@ -2224,11 +2237,16 @@ def _available_tools(transport: str) -> list[dict[str, Any]]:
 
 def _dispatch(message: Any, *, transport: str = "unknown") -> dict[str, Any] | None:
     if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
-        return _jsonrpc_error(message.get("id") if isinstance(message, dict) else None, -32600, "Invalid Request")
+        return _jsonrpc_error(None, -32600, "Invalid Request")
     request_id = message.get("id")
     is_notification = "id" not in message
     if not is_notification and (isinstance(request_id, bool) or not isinstance(request_id, (str, int))):
         return _jsonrpc_error(None, -32600, "Invalid Request")
+    if isinstance(request_id, str):
+        try:
+            request_id.encode("utf-8", errors="strict")
+        except UnicodeEncodeError:
+            return _jsonrpc_error(None, -32600, "Invalid Request")
     method = message.get("method")
     if not isinstance(method, str):
         if is_notification:
@@ -2246,7 +2264,9 @@ def _dispatch(message: Any, *, transport: str = "unknown") -> dict[str, Any] | N
     if method == "initialize":
         editing_available = len(_available_tools(transport)) > len(TOOLS)
         requested = params.get("protocolVersion")
-        version = requested if isinstance(requested, str) and requested in SUPPORTED_PROTOCOL_VERSIONS else MCP_PROTOCOL_VERSION
+        supported_versions = HTTP_SUPPORTED_PROTOCOL_VERSIONS if transport == "http" else SUPPORTED_PROTOCOL_VERSIONS
+        default_version = HTTP_PROTOCOL_VERSION if transport == "http" else MCP_PROTOCOL_VERSION
+        version = requested if isinstance(requested, str) and requested in supported_versions else default_version
         result = {
             "protocolVersion": version,
             "capabilities": {
@@ -2381,7 +2401,7 @@ class MCPHandler(BaseHTTPRequestHandler):
             self._http_error(400, "Versão MCP inválida ou não suportada.")
             return False
         version = versions[0].strip(" \t")
-        if not version.isascii() or version not in SUPPORTED_PROTOCOL_VERSIONS:
+        if not version.isascii() or version not in HTTP_SUPPORTED_PROTOCOL_VERSIONS:
             self._http_error(400, "Versão MCP inválida ou não suportada.")
             return False
         return True
@@ -2442,7 +2462,7 @@ class MCPHandler(BaseHTTPRequestHandler):
         if response is None:
             self._send(202)
             return
-        body = json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        body = _serialize_jsonrpc(response).encode("ascii")
         self._send(200, body)
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
@@ -2505,26 +2525,37 @@ class BoundedMCPHTTPServer(ThreadingHTTPServer):
 def serve_stdio(input_stream=None, output_stream=None) -> None:
     """Serve MCP stdio local; stdout contém somente respostas JSON-RPC por linha."""
     if input_stream is None:
-        input_stream = sys.stdin
-        if hasattr(input_stream, "reconfigure"):
-            input_stream.reconfigure(encoding="utf-8", errors="strict")
+        text_input = sys.stdin
+        if hasattr(text_input, "reconfigure"):
+            text_input.reconfigure(encoding="utf-8", errors="strict")
+        input_stream = getattr(text_input, "buffer", text_input)
     if output_stream is None:
         output_stream = sys.stdout
         if hasattr(output_stream, "reconfigure"):
             output_stream.reconfigure(encoding="utf-8", errors="strict")
     while True:
         line = input_stream.readline(MAX_BODY_BYTES + 2)
-        if line == "":
+        if line in ("", b""):
             return
-        encoded = line.encode("utf-8")
-        too_long = len(encoded) > MAX_BODY_BYTES or (len(line) >= MAX_BODY_BYTES + 2 and not line.endswith("\n"))
+        byte_frame = isinstance(line, (bytes, bytearray))
+        newline = b"\n" if byte_frame else "\n"
+        try:
+            encoded = bytes(line) if byte_frame else line.encode("utf-8", errors="strict")
+        except UnicodeEncodeError:
+            response = _jsonrpc_error(None, -32700, "Parse error")
+            if response is not None:
+                output_stream.write(_serialize_jsonrpc(response) + "\n")
+                output_stream.flush()
+            continue
+        too_long = len(encoded) > MAX_BODY_BYTES or (len(line) >= MAX_BODY_BYTES + 2 and not line.endswith(newline))
         if too_long:
-            while line and not line.endswith("\n"):
+            while line and not line.endswith(newline):
                 line = input_stream.readline(MAX_BODY_BYTES + 2)
             response = _jsonrpc_error(None, -32700, "Parse error: message too large")
         else:
             try:
-                message = json.loads(line)
+                decoded = encoded.decode("utf-8", errors="strict")
+                message = json.loads(decoded)
             except (json.JSONDecodeError, UnicodeDecodeError, ValueError, RecursionError):
                 response = _jsonrpc_error(None, -32700, "Parse error")
             else:
@@ -2533,7 +2564,7 @@ def serve_stdio(input_stream=None, output_stream=None) -> None:
                 except RecursionError:
                     response = _jsonrpc_error(None, -32603, "Internal error")
         if response is not None:
-            output_stream.write(json.dumps(response, ensure_ascii=False, separators=(",", ":")) + "\n")
+            output_stream.write(_serialize_jsonrpc(response) + "\n")
             output_stream.flush()
 
 

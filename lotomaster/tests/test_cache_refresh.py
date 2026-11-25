@@ -1,20 +1,31 @@
+from concurrent.futures import Future
 import threading
+import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from lotomaster import engine
+from lotomaster import engine, storage
 
 
 class LatestResultCacheTests(unittest.TestCase):
     def setUp(self):
         self.original_cache = engine._latest_cache.copy()
+        self.original_db_path = storage.DB_PATH
+        self.original_storage_initialized = storage._initialized
+        self.temporary_database = tempfile.TemporaryDirectory(prefix="lotomaster-cache-test-")
+        storage.DB_PATH = Path(self.temporary_database.name) / "isolated.sqlite3"
+        storage._initialized = False
         engine._latest_cache.clear()
-        self.addCleanup(self._restore_cache)
+        self.addCleanup(self._restore_test_state)
 
-    def _restore_cache(self):
+    def _restore_test_state(self):
         engine._latest_cache.clear()
         engine._latest_cache.update(self.original_cache)
+        storage.DB_PATH = self.original_db_path
+        storage._initialized = self.original_storage_initialized
+        self.temporary_database.cleanup()
 
     def test_refresh_true_fetches_caixa_even_with_recent_memory_cache(self):
         cached = {"contest": 100, "numbers": [1, 2, 3]}
@@ -302,6 +313,36 @@ class LatestResultCacheTests(unittest.TestCase):
             self.assertLess(elapsed, 0.75)
             release.set()
             self.assertTrue(all_saved.wait(timeout=1))
+
+    def test_gap_fill_worker_releases_slot_in_finally_before_returning(self):
+        class CountingSlots:
+            def __init__(self): self.releases = 0
+            def release(self): self.releases += 1
+
+        slots = CountingSlots()
+        with patch.object(engine, "_gap_fill_slots", slots), \
+             patch("lotomaster.engine.fetch_draw", side_effect=OSError("offline")):
+            engine._fetch_and_save_gap("megasena", 101)
+        self.assertEqual(slots.releases, 1)
+
+    def test_cancelled_gap_fill_future_releases_reserved_slot_once(self):
+        class CountingSlots:
+            def __init__(self): self.releases = 0
+            def acquire(self, blocking=False): return True
+            def release(self): self.releases += 1
+
+        slots = CountingSlots()
+        future = Future()
+        future.cancel()
+
+        class CancelledPool:
+            def submit(self, *_args): return future
+
+        with patch.object(engine, "_gap_fill_slots", slots), \
+             patch.object(engine, "_gap_fill_pool", CancelledPool()), \
+             patch("lotomaster.engine._GAP_FILL_BUDGET_SECONDS", 1):
+            engine._fill_missing_draws("megasena", [101])
+        self.assertEqual(slots.releases, 1)
 
     def test_history_page_includes_valid_latest_when_storage_did_not_persist_it(self):
         latest = {

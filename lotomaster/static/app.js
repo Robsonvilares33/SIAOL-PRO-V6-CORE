@@ -8,6 +8,7 @@ const state = {
 let renderVersion = 0;
 let refreshRequestId = 0;
 let simulationRequestId = 0;
+let generatorRequestId = 0;
 let combinationCountRequest = 0;
 const pageNames = {
   overview: 'Visão geral', generator: 'Gerador de jogos', simulator: 'Conferir jogos',
@@ -357,13 +358,47 @@ async function loadHistoryRange(game, first, last, progress) {
 
 async function simulateHistoryInChunks(game, tickets, draws, progress) {
   const byContest=new Map(), summary={};
-  const drawChunkSize=5000;
-  for (let drawStart=0;drawStart<draws.length;drawStart+=drawChunkSize) {
-    const drawChunk=draws.slice(drawStart,drawStart+drawChunkSize);
-    const ticketChunkSize=Math.max(1,Math.min(500,Math.floor(100000/drawChunk.length)));
-    for (let ticketStart=0;ticketStart<tickets.length;ticketStart+=ticketChunkSize) {
-      if (progress) progress.textContent=`Conferindo ${Math.min(drawStart+drawChunk.length,draws.length)} de ${draws.length} concursos · jogos ${ticketStart+1}–${Math.min(ticketStart+ticketChunkSize,tickets.length)}…`;
-      const response=await api(`/${game}/simulate/history`,{method:'POST',body:JSON.stringify({tickets:tickets.slice(ticketStart,ticketStart+ticketChunkSize),draws:drawChunk})});
+  const encoder=new TextEncoder(), requestLimit=2_000_000, drawBudget=1_200_000;
+  const byteLength=value=>encoder.encode(value).byteLength;
+  const drawJson=draws.map(draw=>JSON.stringify(draw));
+  const drawChunks=[]; let currentDraws=[], currentDrawBytes=2;
+  for (const serialized of drawJson) {
+    const nextBytes=currentDrawBytes+(currentDraws.length?1:0)+byteLength(serialized);
+    if (currentDraws.length&&(currentDraws.length>=5000||nextBytes>drawBudget)) { drawChunks.push(currentDraws); currentDraws=[]; currentDrawBytes=2; }
+    const itemBytes=byteLength(serialized)+2;
+    if (itemBytes>drawBudget) throw new Error('Um concurso individual é grande demais para enviar com segurança.');
+    if (currentDraws.length) currentDrawBytes+=1;
+    currentDraws.push(serialized); currentDrawBytes+=byteLength(serialized);
+  }
+  if (currentDraws.length) drawChunks.push(currentDraws);
+  const bodyFor=(ticketBatch,drawBatch)=>`{"tickets":${JSON.stringify(ticketBatch)},"draws":[${drawBatch.join(',')}]}`;
+  for (let drawIndex=0;drawIndex<drawChunks.length;drawIndex++) {
+    const drawChunk=drawChunks[drawIndex];
+    const ticketBatches=[]; let ticketStart=0, splitDraws=false;
+    while (ticketStart<tickets.length) {
+      let ticketCount=Math.max(1,Math.min(500,Math.floor(100000/drawChunk.length),tickets.length-ticketStart));
+      let batch=null, body='';
+      while (ticketCount>=1) {
+        batch=tickets.slice(ticketStart,ticketStart+ticketCount);
+        body=bodyFor(batch,drawChunk);
+        if (byteLength(body)<=requestLimit) break;
+        if (ticketCount===1) break;
+        ticketCount=Math.max(1,Math.floor(ticketCount/2));
+      }
+      if (byteLength(body)>requestLimit) {
+        if (drawChunk.length===1) throw new Error('Um concurso e um jogo excedem o limite de 2.000.000 bytes do endpoint.');
+        const midpoint=Math.ceil(drawChunk.length/2);
+        drawChunks.splice(drawIndex,1,drawChunk.slice(0,midpoint),drawChunk.slice(midpoint));
+        splitDraws=true;
+        break;
+      }
+      ticketBatches.push({batch,body,start:ticketStart});
+      ticketStart+=batch.length;
+    }
+    if (splitDraws) { drawIndex--; continue; }
+    for (const {batch,body,start} of ticketBatches) {
+      if (progress) progress.textContent=`Conferindo concursos ${Math.min(drawIndex+1,drawChunks.length)} de ${drawChunks.length} · jogos ${start+1}–${start+batch.length}…`;
+      const response=await api(`/${game}/simulate/history`,{method:'POST',body});
       if (!Array.isArray(response.draws)||!response.summary) throw new Error('A resposta do serviço não corresponde ao contrato esperado (draws e summary).');
       for (const [category,count] of Object.entries(response.summary)) summary[category]=(summary[category]||0)+Number(count);
       for (const draw of response.draws) {
@@ -501,7 +536,7 @@ function historyItemsNewestFirst(items) {
   return [...(Array.isArray(items)?items:[])].sort((a,b)=>Number(b.contest)-Number(a.contest));
 }
 function resultsHistoryNavigation(history,page) {
-  return {latest:history.index>0,newer:history.index>0,older:page?.next_before!==null&&page?.next_before!==undefined};
+  return {latest:history.index>0||!page,newer:history.index>0,older:page?.next_before!==null&&page?.next_before!==undefined};
 }
 function renderResultsHistoryPage(item,history,page) {
   const items=historyItemsNewestFirst(page.items);
@@ -534,23 +569,28 @@ async function loadResultsHistoryPage(version,index) {
     const page=await api(query);
     if (version!==renderVersion||state.page!=='results'||state.game!==item.key||state.resultsHistory!==history||history.requestId!==requestId) return;
     history.index=index; history.page=page; history.isLoading=false;
+    if (index===0) history.cursors=[null];
     renderResultsHistoryPage(item,history,page);
   } catch(error) {
     if (version!==renderVersion||state.resultsHistory!==history||history.requestId!==requestId) return;
     history.isLoading=false;
     if ($('#history-table')) $('#history-table').innerHTML=errorBlock(error.message);
     if ($('#history-count')) $('#history-count').textContent='Sem conexão';
-    $$('[data-action^="results-"]').forEach(button=>button.disabled=false);
+    const nav=resultsHistoryNavigation(history,history.page);
+    const latestButton=$('[data-action="results-latest"]'), newerButton=$('[data-action="results-newer"]'), olderButton=$('[data-action="results-older"]');
+    if (latestButton) latestButton.disabled=!nav.latest;
+    if (newerButton) newerButton.disabled=!nav.newer;
+    if (olderButton) olderButton.disabled=!nav.older;
   }
 }
 function navigateResultsHistory(action) {
   const history=state.resultsHistory;
-  if (!history||!history.page||history.isLoading) return;
+  if (!history||history.isLoading) return;
   if (action==='results-latest') {
-    history.cursors=[null];
     loadResultsHistoryPage(renderVersion,0);
     return;
   }
+  if (!history.page) return;
   if (action==='results-newer') {
     if (history.index>0) loadResultsHistoryPage(renderVersion,history.index-1);
     return;
@@ -1153,7 +1193,7 @@ async function calculateProbability(event) {
   } catch(error) { target.innerHTML=errorBlock(error.message); }
 }
 async function handleGenerate(event) {
-  event.preventDefault(); const item=spec(); const version=renderVersion;
+  event.preventDefault(); const item=spec(); const version=renderVersion; const requestId=++generatorRequestId;
   const payload={count:Number($('#game-count').value||1),filters:{},pareto:$('#generator-pareto')?.checked===true};
   if (item.key!=='supersete') {
     for (const key of ['sum','even','repeat','prime','fibonacci','sequence','jumps','line','column','q1','q2','q3','q4']) {
@@ -1191,24 +1231,26 @@ async function handleGenerate(event) {
   const target=$('#generated-output'); target.innerHTML='<div class="loading-block"><span class="spinner"></span>Montando jogos...</div>';
   try {
     const response=await api(`/${item.key}/generate`,{method:'POST',body:JSON.stringify(payload)});
-    if (version!==renderVersion || state.page!=='generator' || state.game!==item.key) return;
+    if (requestId!==generatorRequestId || version!==renderVersion || state.page!=='generator' || state.game!==item.key) return;
     state.generated=response.items; state.simulatorTickets=[];
     target.innerHTML=response.items.map(ticket=>`<div class="generated-ticket"><div class="generated-ticket-head"><b>Jogo ${esc(ticket.ticket_number)}</b><span class="pill">${payload.pareto?'Aleatório · Pareto histórico':payload.weights?'Ponderado':'Aleatório'}</span></div>${item.key==='supersete'?`<div class="col-grid">${ticket.columns.map((values,i)=>`<div class="col-box"><strong>COLUNA ${i+1}</strong>${balls(values)}</div>`).join('')}</div>`:`<div class="ball-row">${balls(ticket.numbers)}</div>`}${ticket.bonus?.month?`<div class="ticket-stats">Mês da Sorte: ${esc(months[Number(ticket.bonus.month)-1]||ticket.bonus.month)}</div>`:''}${ticket.bonus?.team?`<div class="ticket-stats">Time do Coração: ${esc(ticket.bonus.team)}</div>`:''}${ticket.bonus?.trevos?`<div class="ticket-stats">Trevos: ${balls(ticket.bonus.trevos,true)}</div>`:''}<div class="ticket-stats"><span>Soma: ${esc(ticket.sum??'—')}</span><span>Pares: ${esc(ticket.even_count)}</span><span>Ímpares: ${esc(ticket.odd_count)}</span><span>Repetidas do último: ${esc(ticket.repeated_from_latest)}</span><span>${esc(probabilityEvent(item,ticket.probability))}: 1 em ${esc(Number(ticket.probability.one_in).toLocaleString('pt-BR'))}</span></div></div>`).join('')+`<div class="form-actions"><button class="button button-primary" data-action="test-generated">Conferir estes jogos</button><a class="button" href="${API}/${item.key}/export.csv?limit=100">↓ Exportar histórico</a></div><div class="small-note">${esc(response.disclaimer)}</div>`;
     if (response.pareto) target.innerHTML+=`<div class="small-note">Pareto local: ${esc(response.pareto.draws_analyzed)} concursos até o concurso ${esc(response.pareto.latest_contest??'—')}; ${esc(response.pareto.total_appearances)} aparições observadas, conjunto selecionado ${esc((response.pareto.selected_numbers||[]).map(n=>padNum(n,item.digits)).join(' '))}. ${esc(response.pareto.scope||'Regra retrospectiva de 80%; não prevê resultados.')}</div>`;
     if (item.key==='maismilionaria') $$('.generated-ticket',target).forEach((element,index)=>{const count=response.items[index].probability.ticket_subbets;element.insertAdjacentHTML('beforeend',`<div class="ticket-stats">Subapostas distintas neste bilhete: ${esc(Number(count).toLocaleString('pt-BR'))}</div>`);});
     if (item.key==='lotomania') $$('.generated-ticket',target).forEach((element,index)=>{const counts=lotomaniaQuadrantCounts(response.items[index].numbers);element.insertAdjacentHTML('beforeend',`<div class="ticket-stats quadrant-counts"><span>Q1: ${counts.Q1}</span><span>Q2: ${counts.Q2}</span><span>Q3: ${counts.Q3}</span><span>Q4: ${counts.Q4}</span></div>`);});
-  } catch(error) { target.innerHTML=errorBlock(error.message); }
+  } catch(error) { if (requestId===generatorRequestId && version===renderVersion && state.page==='generator' && state.game===item.key) target.innerHTML=errorBlock(error.message); }
 }
 async function handleSimulate(event) {
   event.preventDefault(); const item=spec(); const version=renderVersion; const requestId=++simulationRequestId;
   const typed=$('#sim-numbers').value;
   let tickets;
-  const preloaded=state.simulatorTickets.length && typed===state.simulatorText;
+  const typedRows=parseStrictNumberLines(typed);
+  const savedRows=state.simulatorTickets.length?parseStrictNumberLines(state.simulatorText):null;
+  const preloaded=state.simulatorTickets.length && typedRows!==null && savedRows!==null && JSON.stringify(typedRows)===JSON.stringify(savedRows);
   const bonus={};
   if (preloaded) {
     tickets=state.simulatorTickets;
   } else {
-    const parsed=parseStrictNumberLines(typed);
+    const parsed=typedRows;
     if (!parsed) { $('#sim-result').innerHTML='<div class="error-box">Há uma ou mais linhas com conteúdo inválido. Informe apenas números inteiros; nenhum jogo será omitido.</div>'; return; }
     if (!parsed.length) { $('#sim-result').innerHTML=errorBlock('Digite ao menos um jogo.'); return; }
     if (item.bonus?.type==='month'&&$('#sim-month').value) bonus.month=Number($('#sim-month').value);
@@ -1257,6 +1299,19 @@ async function handleSimulate(event) {
     target.innerHTML=`<div class="card" style="box-shadow:none;padding:12px;border-color:#dfe9de"><div class="card-head"><div><h3 class="card-title">Resultado do concurso ${esc(response.contest)}</h3><div class="card-subtitle">${esc(response.draw_date||'')}</div></div><span class="pill">${clientOrigin?'Dados enviados pelo navegador':'Origem não verificada'}</span></div><div class="small-note">${esc(provenanceText)} ${esc(draw.source?`Fonte informada pelo navegador: ${draw.source}.`:"")}</div>${drawWarning?`<div class="notice notice-warning">${esc(drawWarning)} · o concurso pode estar desatualizado; confirme na CAIXA.</div>`:""}<div class="ball-row">${balls(draw.numbers)}${draw.second_numbers?.length?balls(draw.second_numbers):''}${draw.trevos?.length?balls(draw.trevos,true):''}</div>${response.results.map(result=>{const awards=awardDisplay(result);return `<div class="draw-row"><div class="draw-title">Jogo ${esc(result.ticket_number)}</div><div>${result.main_hits!==undefined?`<b>${esc(result.main_hits)} acertos</b>`:`<b>${esc(result.hits)} colunas</b>`}${result.second_hits!==undefined?` · 2º sorteio ${esc(result.second_hits)}`:''} ${awards?`<span class="pill pill-warm">${esc(awards)}</span>`:'<span class="pill pill-muted">Sem faixa de premiação</span>'}${result.month_hit?'<span class="pill">Mês da Sorte</span>':''}${result.team_hit?'<span class="pill">Time do Coração</span>':''}${result.trevo_hits?`<span class="pill">${esc(result.trevo_hits)} trevos</span>`:''}</div></div>`}).join('')}<div class="form-actions"><button type="button" class="button" data-action="download-simple-report">Baixar relatório CSV</button></div><div class="small-note">O relatório é gerado no seu dispositivo; nada é salvo pelo servidor. A conferência é informativa; confirme premiações no portal oficial da CAIXA.</div></div>`;
   } catch(error) { if (requestId===simulationRequestId && version===renderVersion && state.page==='simulator' && state.game===item.key) target.innerHTML=errorBlock(error.message); }
 }
+function closeMobileSidebar() {
+  const sidebar=$('#sidebar');
+  if (!sidebar) return;
+  const wasOpen=sidebar.classList.contains('open');
+  sidebar.classList.remove('open');
+  if (wasOpen&&sidebar.contains(document.activeElement)) $('#menu-toggle')?.focus();
+}
+function toggleMobileSidebar() {
+  const sidebar=$('#sidebar');
+  if (!sidebar) return;
+  if (sidebar.classList.contains('open')) closeMobileSidebar();
+  else sidebar.classList.add('open');
+}
 function handleClick(event) {
   const pageButton=event.target.closest('[data-page]');
   const gameButton=event.target.closest('[data-game]');
@@ -1274,8 +1329,8 @@ function handleClick(event) {
     } catch(_) { toast('Não foi possível abrir essa combinação.'); }
     return;
   }
-  if (pageButton) { if(state.page==='tools'&&state.game==='lotofacil')invalidateHistoryNumberSearch('Pesquisa cancelada ao sair da tela.'); state.page=pageButton.dataset.page; if (gameButton) { if(state.page==='tools'&&state.game==='lotofacil')invalidateHistoryNumberSearch('Pesquisa cancelada ao trocar de modalidade.'); state.game=gameButton.dataset.game; state.generated=[]; state.simulatorTickets=[]; state.simulatorText=''; state.simulatorBonus={}; } $('#sidebar')?.classList.remove('open'); render(); return; }
-  if (gameButton) { if(state.page==='tools'&&state.game==='lotofacil')invalidateHistoryNumberSearch('Pesquisa cancelada ao trocar de modalidade.'); state.game=gameButton.dataset.game; state.page='overview'; state.generated=[]; state.simulatorTickets=[]; state.simulatorText=''; state.simulatorBonus={}; $('#sidebar')?.classList.remove('open'); render(); return; }
+  if (pageButton) { if(state.page==='tools'&&state.game==='lotofacil')invalidateHistoryNumberSearch('Pesquisa cancelada ao sair da tela.'); state.page=pageButton.dataset.page; if (gameButton) { if(state.page==='tools'&&state.game==='lotofacil')invalidateHistoryNumberSearch('Pesquisa cancelada ao trocar de modalidade.'); state.game=gameButton.dataset.game; state.generated=[]; state.simulatorTickets=[]; state.simulatorText=''; state.simulatorBonus={}; } closeMobileSidebar(); render(); return; }
+  if (gameButton) { if(state.page==='tools'&&state.game==='lotofacil')invalidateHistoryNumberSearch('Pesquisa cancelada ao trocar de modalidade.'); state.game=gameButton.dataset.game; state.page='overview'; state.generated=[]; state.simulatorTickets=[]; state.simulatorText=''; state.simulatorBonus={}; closeMobileSidebar(); render(); return; }
   if (modeButton) { state.mode=modeButton.dataset.mode; $$('.pick-mode button').forEach(btn=>btn.classList.toggle('active',btn===modeButton)); return; }
   if (numberButton) {
     const wasFixed=numberButton.classList.contains('is-fixed'); const wasExcluded=numberButton.classList.contains('is-excluded');
@@ -1355,12 +1410,12 @@ async function init() {
     renderGameNav();
     $('#game-picker').addEventListener('change',e=>{if(state.page==='tools'&&state.game==='lotofacil')invalidateHistoryNumberSearch('Pesquisa cancelada ao trocar de modalidade.');state.game=e.target.value;state.page='overview';state.generated=[];state.simulatorTickets=[];state.simulatorText='';state.simulatorBonus={};render();});
     $('#refresh-button').addEventListener('click',()=>refreshLiveData(true));
-    $('#menu-toggle').addEventListener('click',()=>$('#sidebar').classList.toggle('open'));
+    $('#menu-toggle').addEventListener('click',toggleMobileSidebar);
     $('#main-content').addEventListener('click',handleClick);
     $('#main-content').addEventListener('change',handleChange);
     $('#main-content').addEventListener('submit',handleSubmit);
-    $('#game-nav').addEventListener('click',event=>{const target=event.target.closest('[data-game]');if(target){if(state.page==='tools'&&state.game==='lotofacil')invalidateHistoryNumberSearch('Pesquisa cancelada ao trocar de modalidade.');state.game=target.dataset.game;state.page='overview';state.generated=[];state.simulatorTickets=[];state.simulatorText='';state.simulatorBonus={};render();}});
-    $$('.section-nav [data-page]').forEach(button=>button.addEventListener('click',()=>{if(state.page==='tools'&&state.game==='lotofacil')invalidateHistoryNumberSearch('Pesquisa cancelada ao sair da tela.');state.page=button.dataset.page;render();}));
+    $('#game-nav').addEventListener('click',event=>{const target=event.target.closest('[data-game]');if(target){if(state.page==='tools'&&state.game==='lotofacil')invalidateHistoryNumberSearch('Pesquisa cancelada ao trocar de modalidade.');state.game=target.dataset.game;state.page='overview';state.generated=[];state.simulatorTickets=[];state.simulatorText='';state.simulatorBonus={};closeMobileSidebar();render();}});
+    $$('.section-nav [data-page]').forEach(button=>button.addEventListener('click',()=>{if(state.page==='tools'&&state.game==='lotofacil')invalidateHistoryNumberSearch('Pesquisa cancelada ao sair da tela.');state.page=button.dataset.page;closeMobileSidebar();render();}));
     await render();
     state.lastRefreshAt=Date.now();
     window.setInterval(()=>refreshLiveData(false),5*60*1000);
