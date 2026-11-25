@@ -6,6 +6,8 @@ const state = {
   closureData: null, repeatedData: null, myGames: [], myGamesFiltered: [], myGameFilters: {}, myGamesError: '',
 };
 let renderVersion = 0;
+let refreshRequestId = 0;
+let simulationRequestId = 0;
 let combinationCountRequest = 0;
 const pageNames = {
   overview: 'Visão geral', generator: 'Gerador de jogos', simulator: 'Conferir jogos',
@@ -140,7 +142,7 @@ function pickGrid(item) {
   return `<div class="card"><div class="card-head"><div><h2 class="card-title">Fixar ou remover dezenas</h2><div class="card-subtitle">Toque nas dezenas e use o modo escolhido. Sem seleção, o jogo é aleatório.</div></div><div class="pick-mode"><button type="button" data-mode="fixed" class="${state.mode==='fixed'?'active':''}">● Fixar</button><button type="button" data-mode="excluded" class="${state.mode==='excluded'?'active':''}">× Remover</button></div></div><div class="legend"><span><i class="fixed"></i>Fixa</span><span><i class="removed"></i>Removida</span><span>Disponíveis ${item.range.minimum}–${item.range.maximum}</span></div><div class="number-grid" id="number-grid">${Array.from({length:item.range.maximum-item.range.minimum+1},(_,i)=>i+item.range.minimum).map(n=>`<button type="button" class="number-cell" data-number="${n}" aria-pressed="false">${esc(padNum(n,item.digits))}</button>`).join('')}</div></div>`;
 }
 function superSeteGrid() {
-  return `<div class="card"><div class="card-head"><div><h2 class="card-title">Seleção por coluna</h2><div class="card-subtitle">Marque os dígitos fixos ou excluídos em cada coluna; por padrão é sorteado um dígito por coluna.</div></div><div class="pick-mode"><button type="button" data-mode="fixed" class="${state.mode==='fixed'?'active':''}">● Fixar</button><button type="button" data-mode="excluded" class="${state.mode==='excluded'?'active':''}">× Remover</button></div></div><div class="col-grid">${Array.from({length:7},(_,i)=>`<div class="col-box"><strong>COLUNA ${i+1}</strong><div class="col-digits">${Array.from({length:10},(_,n)=>`<button type="button" data-column="${i+1}" data-digit="${n}">${n}</button>`).join('')}</div><label class="small-note">Opções <select data-column-pick="${i+1}" aria-label="Quantidade de opções na coluna ${i+1}">${Array.from({length:10},(_,j)=>`<option value="${j+1}" ${j===0?'selected':''}>${j+1}</option>`).join('')}</select></label></div>`).join('')}</div></div>`;
+  return `<div class="card"><div class="card-head"><div><h2 class="card-title">Seleção por coluna</h2><div class="card-subtitle">Marque os dígitos fixos ou excluídos em cada coluna; por padrão é sorteado um dígito por coluna.</div></div><div class="pick-mode"><button type="button" data-mode="fixed" class="${state.mode==='fixed'?'active':''}">● Fixar</button><button type="button" data-mode="excluded" class="${state.mode==='excluded'?'active':''}">× Remover</button></div></div><div class="col-grid">${Array.from({length:7},(_,i)=>`<div class="col-box"><strong>COLUNA ${i+1}</strong><div class="col-digits">${Array.from({length:10},(_,n)=>`<button type="button" data-column="${i+1}" data-digit="${n}" aria-pressed="false">${n}</button>`).join('')}</div><label class="small-note">Opções <select data-column-pick="${i+1}" aria-label="Quantidade de opções na coluna ${i+1}">${Array.from({length:10},(_,j)=>`<option value="${j+1}" ${j===0?'selected':''}>${j+1}</option>`).join('')}</select></label></div>`).join('')}</div></div>`;
 }
 function bonusFields(item) {
   if (!item.bonus) return '';
@@ -648,7 +650,7 @@ function validateAssistantHistoryPage(page, pageLimit, seenDraws, seenMissing) {
     for (let contest=from;contest<=to;contest++) if (!localDraws.has(contest)) missing.add(contest);
   }
   const unreported=Math.max(0,expected-rows.length-missing.size);
-  return {expected,rows,missing,unreported};
+  return {expected,rows,missing,unreported,from,to};
 }
 
 async function fetchAssistantHistory(item, mode, progress, signal) {
@@ -674,9 +676,10 @@ async function fetchAssistantHistory(item, mode, progress, signal) {
     if (hasMore&&checked.expected===0) throw new Error('O cursor do histórico avançou sem concursos esperados.');
     if (hasMore) {
       const next=Number(page.next_before);
-      if (!Number.isSafeInteger(next)||next<1||(before!==null&&next>=before)) throw new Error('O cursor do histórico retornou um valor inválido.');
+      if (!Number.isSafeInteger(next)||next<1||(before!==null&&next>=before) || (checked.from!==null&&next!==checked.from)) throw new Error('O cursor do histórico retornou um valor inválido ou descontínuo.');
+      if (before!==null && checked.to!==before-1) throw new Error('As páginas do histórico não são contínuas.');
       before=next;
-    }
+    } else if (before!==null && checked.to!==before-1) throw new Error('As páginas do histórico não são contínuas.');
     progress.textContent=`Carregando recorte da CAIXA: ${byContest.size} concursos recebidos · ${missing.size} indisponível(is)`;
   }
   if (hasMore&&expectedCount<limit) throw new Error('O recorte excedeu o limite de 500 concursos desta análise.');
@@ -1197,7 +1200,7 @@ async function handleGenerate(event) {
   } catch(error) { target.innerHTML=errorBlock(error.message); }
 }
 async function handleSimulate(event) {
-  event.preventDefault(); const item=spec(); const version=renderVersion;
+  event.preventDefault(); const item=spec(); const version=renderVersion; const requestId=++simulationRequestId;
   const typed=$('#sim-numbers').value;
   let tickets;
   const preloaded=state.simulatorTickets.length && typed===state.simulatorText;
@@ -1245,14 +1248,14 @@ async function handleSimulate(event) {
     if (contestText) request.contest=Number(contestText);
     else request.draw=await api(`/${item.key}/latest`);
     const response=await api(`/${item.key}/simulate`,{method:'POST',body:JSON.stringify(request)});
-    if (version!==renderVersion || state.page!=='simulator' || state.game!==item.key) return;
+    if (requestId!==simulationRequestId || version!==renderVersion || state.page!=='simulator' || state.game!==item.key) return;
     const clientOrigin=response.draw_origin==='client_submitted';
     const draw=response.draw||{};
     const provenanceText=response.provenance?.description||(clientOrigin?'Dados enviados pelo navegador; o servidor não verificou sua origem.':'Origem do resultado não verificada independentemente.');
     const drawWarning=draw.warning||response.warning||response.provenance?.warning;
     state.simpleSimulation={response,tickets,game:item.key};
     target.innerHTML=`<div class="card" style="box-shadow:none;padding:12px;border-color:#dfe9de"><div class="card-head"><div><h3 class="card-title">Resultado do concurso ${esc(response.contest)}</h3><div class="card-subtitle">${esc(response.draw_date||'')}</div></div><span class="pill">${clientOrigin?'Dados enviados pelo navegador':'Origem não verificada'}</span></div><div class="small-note">${esc(provenanceText)} ${esc(draw.source?`Fonte informada pelo navegador: ${draw.source}.`:"")}</div>${drawWarning?`<div class="notice notice-warning">${esc(drawWarning)} · o concurso pode estar desatualizado; confirme na CAIXA.</div>`:""}<div class="ball-row">${balls(draw.numbers)}${draw.second_numbers?.length?balls(draw.second_numbers):''}${draw.trevos?.length?balls(draw.trevos,true):''}</div>${response.results.map(result=>{const awards=awardDisplay(result);return `<div class="draw-row"><div class="draw-title">Jogo ${esc(result.ticket_number)}</div><div>${result.main_hits!==undefined?`<b>${esc(result.main_hits)} acertos</b>`:`<b>${esc(result.hits)} colunas</b>`}${result.second_hits!==undefined?` · 2º sorteio ${esc(result.second_hits)}`:''} ${awards?`<span class="pill pill-warm">${esc(awards)}</span>`:'<span class="pill pill-muted">Sem faixa de premiação</span>'}${result.month_hit?'<span class="pill">Mês da Sorte</span>':''}${result.team_hit?'<span class="pill">Time do Coração</span>':''}${result.trevo_hits?`<span class="pill">${esc(result.trevo_hits)} trevos</span>`:''}</div></div>`}).join('')}<div class="form-actions"><button type="button" class="button" data-action="download-simple-report">Baixar relatório CSV</button></div><div class="small-note">O relatório é gerado no seu dispositivo; nada é salvo pelo servidor. A conferência é informativa; confirme premiações no portal oficial da CAIXA.</div></div>`;
-  } catch(error) { target.innerHTML=errorBlock(error.message); }
+  } catch(error) { if (requestId===simulationRequestId && version===renderVersion && state.page==='simulator' && state.game===item.key) target.innerHTML=errorBlock(error.message); }
 }
 function handleClick(event) {
   const pageButton=event.target.closest('[data-page]');
@@ -1271,14 +1274,15 @@ function handleClick(event) {
     } catch(_) { toast('Não foi possível abrir essa combinação.'); }
     return;
   }
-  if (pageButton) { if(state.page==='tools'&&state.game==='lotofacil')invalidateHistoryNumberSearch('Pesquisa cancelada ao sair da tela.'); state.page=pageButton.dataset.page; if (gameButton) { if(state.page==='tools'&&state.game==='lotofacil')invalidateHistoryNumberSearch('Pesquisa cancelada ao trocar de modalidade.'); state.game=gameButton.dataset.game; state.generated=[]; state.simulatorTickets=[]; state.simulatorText=''; state.simulatorBonus={}; } $('#sidebar').classList.remove('open'); render(); return; }
-  if (gameButton) { if(state.page==='tools'&&state.game==='lotofacil')invalidateHistoryNumberSearch('Pesquisa cancelada ao trocar de modalidade.'); state.game=gameButton.dataset.game; state.page='overview'; state.generated=[]; state.simulatorTickets=[]; state.simulatorText=''; state.simulatorBonus={}; render(); return; }
+  if (pageButton) { if(state.page==='tools'&&state.game==='lotofacil')invalidateHistoryNumberSearch('Pesquisa cancelada ao sair da tela.'); state.page=pageButton.dataset.page; if (gameButton) { if(state.page==='tools'&&state.game==='lotofacil')invalidateHistoryNumberSearch('Pesquisa cancelada ao trocar de modalidade.'); state.game=gameButton.dataset.game; state.generated=[]; state.simulatorTickets=[]; state.simulatorText=''; state.simulatorBonus={}; } $('#sidebar')?.classList.remove('open'); render(); return; }
+  if (gameButton) { if(state.page==='tools'&&state.game==='lotofacil')invalidateHistoryNumberSearch('Pesquisa cancelada ao trocar de modalidade.'); state.game=gameButton.dataset.game; state.page='overview'; state.generated=[]; state.simulatorTickets=[]; state.simulatorText=''; state.simulatorBonus={}; $('#sidebar')?.classList.remove('open'); render(); return; }
   if (modeButton) { state.mode=modeButton.dataset.mode; $$('.pick-mode button').forEach(btn=>btn.classList.toggle('active',btn===modeButton)); return; }
   if (numberButton) {
     const wasFixed=numberButton.classList.contains('is-fixed'); const wasExcluded=numberButton.classList.contains('is-excluded');
     numberButton.classList.remove('is-fixed','is-excluded');
     if (state.mode==='fixed'&&!wasFixed) numberButton.classList.add('is-fixed');
     if (state.mode==='excluded'&&!wasExcluded) numberButton.classList.add('is-excluded');
+    numberButton.setAttribute('aria-pressed',String(numberButton.classList.contains('is-fixed')||numberButton.classList.contains('is-excluded')));
     return;
   }
   if (columnButton) {
@@ -1288,6 +1292,7 @@ function handleClick(event) {
     columnButton.classList.remove('on-fixed','on-excluded');
     if (!on) columnButton.classList.add(className);
     else columnButton.classList.remove(other);
+    columnButton.setAttribute('aria-pressed',String(columnButton.classList.contains('on-fixed')||columnButton.classList.contains('on-excluded')));
     columnButton.classList.toggle('on',!on);
     return;
   }
@@ -1366,9 +1371,11 @@ async function init() {
 }
 async function refreshLiveData(force) {
   if (!state.catalog.length || document.hidden) return;
+  const requestId=++refreshRequestId;
   const page=state.page;
   const game=state.game;
   const latest=await Promise.all(state.catalog.map(item=>api(`/${item.key}/latest`).then(draw=>({item,draw})).catch(()=>null)));
+  if (requestId!==refreshRequestId) return;
   const successful=latest.filter(Boolean);
   if (!successful.length) {
     if ($('#sync-status')) $('#sync-status').textContent='Falha ao atualizar resultados';

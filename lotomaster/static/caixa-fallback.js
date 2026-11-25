@@ -66,6 +66,11 @@
     if (item.key==='timemania') {
       if (typeof draw.team!=='string' || !draw.team.trim() || draw.team.length>100) throw new Error('Time inválido.');
     } else if (draw.team != null) throw new Error('Time incompatível.');
+    if (![draw.estimated_prize, draw.next_prize].every(value=>typeof value==='number'&&Number.isFinite(value)&&value>=0)) throw new Error('Valor monetário inválido.');
+    if (!Array.isArray(draw.winners_by_tier) || draw.winners_by_tier.some(tier=>
+      !tier || !Number.isSafeInteger(tier.winners) || tier.winners<0
+      || typeof tier.prize!=='number' || !Number.isFinite(tier.prize) || tier.prize<0
+    )) throw new Error('Rateio de prêmios inválido.');
     if ('special_draw' in draw && typeof draw.special_draw!=='boolean') throw new Error('Indicador especial inválido.');
     return draw;
   }

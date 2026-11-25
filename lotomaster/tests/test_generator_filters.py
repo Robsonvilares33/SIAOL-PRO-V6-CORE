@@ -1,7 +1,8 @@
 import unittest
 from unittest.mock import patch
 
-from lotomaster.engine import _passes_filters, generate_tickets
+from lotomaster.catalog import get_spec
+from lotomaster.engine import _passes_filters, _validate_ticket, generate_tickets
 
 
 class GeneratorFilterTests(unittest.TestCase):
@@ -59,6 +60,31 @@ class GeneratorFilterTests(unittest.TestCase):
                 with self.subTest(filters=filters), self.assertRaisesRegex(ValueError, "Super Sete"):
                     generate_tickets("supersete", {"filters": filters})
             self.assertEqual(len(generate_tickets("supersete", {"filters": {}})[0]["columns"]), 7)
+
+    def test_super_set_accepts_official_simple_and_multiple_bet_sizes(self):
+        valid_counts = [
+            [1, 1, 1, 1, 1, 1, 1],
+            [2, 1, 1, 1, 1, 1, 1],
+            [2, 2, 2, 2, 2, 2, 2],
+            [3, 2, 2, 2, 2, 2, 2],
+            [3, 3, 3, 3, 3, 3, 3],
+        ]
+        with patch("lotomaster.engine.storage.latest_draw", return_value=None):
+            for counts in valid_counts:
+                columns = {str(index): {"pick_count": count} for index, count in enumerate(counts, 1)}
+                ticket = generate_tickets("supersete", {"columns": columns})[0]
+                with self.subTest(counts=counts):
+                    self.assertEqual([len(column) for column in ticket["columns"]], counts)
+
+        invalid_columns = [[0], [0, 1], [0, 1], [0, 1], [0, 1], [0, 1, 2], [0, 1, 2]]
+        with self.assertRaisesRegex(ValueError, "aposta múltipla"):
+            _validate_ticket(get_spec("supersete"), {"columns": invalid_columns})
+        with patch("lotomaster.engine.storage.latest_draw", return_value=None), \
+             self.assertRaisesRegex(ValueError, "aposta múltipla"):
+            generate_tickets("supersete", {"columns": {
+                str(index): {"pick_count": count}
+                for index, count in enumerate([1, 2, 2, 2, 2, 3, 3], 1)
+            }})
 
     def test_existing_sum_even_repeat_filters_remain_active(self):
         nums = [1, 2, 3, 4, 5, 6]

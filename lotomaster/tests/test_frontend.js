@@ -258,3 +258,36 @@ test('histórico público mostra avisos de cache e informa proveniência não ve
   assert.match(elements['#history-table'].innerHTML,/cache do servidor/);
   assert.match(elements['#history-table'].innerHTML,/não verificada independentemente/);
 });
+
+test('polling mais antigo não sobrescreve resultados de polling iniciado depois', async () => {
+  let resolveOld, resolveNew;
+  let calls=0;
+  const {context,elements}=setup(() => new Promise(resolve => { if (++calls===1) resolveOld=resolve; else resolveNew=resolve; }));
+  elements['#sync-status']={textContent:''};
+  context.render=async()=>{};
+  vm.runInContext("state.catalog=[{key:'quina'}];state.page='overview';state.lastContests.quina=1",context);
+  const old=vm.runInContext('refreshLiveData(false)',context);
+  const newer=vm.runInContext('refreshLiveData(false)',context);
+  resolveNew(response({contest:3})); await newer;
+  resolveOld(response({contest:2})); await old;
+  assert.equal(vm.runInContext('state.lastContests.quina',context),3);
+});
+
+test('histórico rejeita cursor que não corresponde ao limite da página', async () => {
+  const {context}=setup(async()=>response({items:[{contest:8,numbers:[1,2,3,4,5]}],from_contest:8,to_contest:8,expected_count:1,missing_contests:[],next_before:7,provenance:{recently_checked:true}}));
+  context.progress={textContent:''};
+  await assert.rejects(vm.runInContext("fetchAssistantHistory({key:'quina'},'all',progress)",context),/cursor.*inválido ou descontínuo/);
+});
+
+test('controles de seleção mantêm aria-pressed sincronizado com estado visual', () => {
+  const {context}=setup();
+  const digits=vm.runInContext('superSeteGrid()',context).match(/<button type="button" data-column="\d+" data-digit="\d+" aria-pressed="false">/g)||[];
+  assert.equal(digits.length,70);
+  const classes=new Set();
+  const button={dataset:{},classList:{contains:name=>classes.has(name),add:name=>classes.add(name),remove(...names){names.forEach(name=>classes.delete(name));}},setAttribute(name,value){this[name]=value;}};
+  context.event={target:{closest:selector=>selector==='.number-cell'?button:null}};
+  vm.runInContext("state.mode='fixed';handleClick(event)",context);
+  assert.equal(button['aria-pressed'],'true');
+  vm.runInContext('handleClick(event)',context);
+  assert.equal(button['aria-pressed'],'false');
+});

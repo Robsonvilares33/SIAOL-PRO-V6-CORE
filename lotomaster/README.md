@@ -90,12 +90,13 @@ Outras consultas de histórico usam janelas de até 300 concursos por modalidade
 
 - `assistant` e `assistant/from-draws` permanecem locais por padrão. Gemini no servidor exige solicitação explícita, habilitação, chave do provedor e bearer token forte separado; endpoints públicos não devem encaminhar chamadas pagas sem autenticação, gateway e quotas.
 - `statistics/from-draws` aceita de 1 a 500 concursos; `assistant/from-draws`, de 1 a 300. Cada corpo é limitado a 1.000.000 bytes antes do parsing, inclusive em requisições por partes (413 acima do limite); entradas inválidas retornam 422. Configure também limites de tamanho, tempo, concorrência e taxa no proxy.
+- `/simulate`, `/simulate/history` e `/lotofacil/history-number-search` aceitam corpos de até 2.000.000 bytes; o servidor conta os bytes recebidos mesmo sem `Content-Length` e devolve 413 quando o limite é excedido. Os lotes continuam limitados a até 500 jogos e 5.000 concursos conforme cada endpoint; configure também limites de tempo, concorrência e taxa no proxy.
 - Cada concurso exige modalidade correta, número inteiro positivo único e dezenas inteiras na quantidade/faixa da modalidade, sem repetição (exceto dígitos em colunas distintas do Super Sete). Campos especiais e ordem, quando enviados, devem ser coerentes. Dados suplementares ausentes não entram em suas estatísticas. A validação estrutural não autentica a origem dos dados.
 - `/simulate` valida resultado de todas as origens, inclusive cache antigo, e exige dados especiais aplicáveis para Dupla Sena, +Milionária, Dia de Sorte e Timemania. Exige também bônus compatíveis nos jogos e Time do Coração para gerar Timemania. Confirme prêmios na CAIXA.
 - A +Milionária aceita apostas múltiplas de 6–12 dezenas e 2–6 trevos no gerador, conferidor e calculadora; cada bilhete equivale a `C(n,6) × C(t,2)` subapostas simples. Trevos individuais são preservados por padrão; substituir em lote exige ação explícita. O indicador de concursos especiais em analytics chama-se `marked_special_draws`.
 - Alterações no formato CAIXA podem causar rejeição. Dados inválidos já armazenados podem causar erro na análise e devem ser verificados separadamente. Limite de corpo não restringe tamanho da resposta CAIXA nem protege outras rotas.
 
-Execute os testes offline a partir da raiz do repositório, usando banco temporário para preservar o banco local:
+Execute os testes offline a partir da raiz do repositório. Instale as dependências de teste (`pytest` além das dependências da aplicação) com `python3 -m pip install -r requirements-dev.txt`, então use um banco temporário para preservar o banco local:
 
 ```bash
 test_db=$(mktemp /tmp/lotomaster-tests-XXXXXX.sqlite3)
@@ -124,7 +125,7 @@ Argumentos: -m lotomaster.mcp_server --transport stdio
 Diretório de trabalho: <raiz-do-checkout, diretório que contém lotomaster/>
 ```
 
-O computador precisa ter Python 3 e as dependências do projeto instaladas. O comando pode ser testado manualmente na raiz do checkout. Este checkout está no ambiente sandbox desta tarefa; não se deve presumir que seu caminho exista ou seja compartilhado com o computador onde o Cue iniciará o processo. Não foi configurado conector do Cue.
+O computador precisa ter Python 3.11 ou superior e as dependências do projeto instaladas. O comando pode ser testado manualmente na raiz do checkout. Este checkout está no ambiente sandbox desta tarefa; não se deve presumir que seu caminho exista ou seja compartilhado com o computador onde o Cue iniciará o processo. Não foi configurado conector do Cue.
 
 ### Grok Bot: endpoint público HTTPS
 

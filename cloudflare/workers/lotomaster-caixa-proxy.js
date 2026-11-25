@@ -97,12 +97,16 @@ async function handle(request, event) {
   if (!contentType.toLowerCase().includes('json')) {
     return jsonReply(request, { error: 'caixa_non_json_response', upstream_status: upstream.status }, 502);
   }
-  const body = await upstream.text();
+  let body;
+  try { body = await upstream.text(); } catch (_) {
+    return jsonReply(request, { error: 'caixa_body_read_error' }, 502);
+  }
   let data;
   try { data = JSON.parse(body); } catch (_) {
     return jsonReply(request, { error: 'caixa_invalid_json' }, 502);
   }
   if (!data || !data.numero) return jsonReply(request, { error: 'caixa_invalid_draw' }, 502);
+  if (contest && Number(data.numero) !== Number(contest)) return jsonReply(request, { error: 'caixa_contest_mismatch' }, 502);
 
   const stored = new Response(body, {
     status: 200,

@@ -46,10 +46,8 @@ from .engine import simulate_ticket_history, ticket_probability
 
 MCP_PATH = "/mcp"
 REPO_ROOT = Path(__file__).resolve().parent.parent
-MCP_PROTOCOL_VERSION = "2025-11-25"
-SUPPORTED_PROTOCOL_VERSIONS = {
-    "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05",
-}
+MCP_PROTOCOL_VERSION = "2024-11-05"
+SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05"}
 MAX_BODY_BYTES = 1_048_576
 MAX_HISTORY_PAGE = 500
 MAX_ANALYSIS_DRAWS = 300
@@ -538,6 +536,9 @@ def _read_project_file(arguments: dict[str, Any], *, transport: str = "") -> dic
     max_lines = _require_int(arguments.get("max_lines", 200), "max_lines", 1, 400)
     try:
         raw = _read_project_file_bytes(relative)
+        listed = {item["path"] for item in _project_file_index()}
+        if relative.as_posix() not in listed:
+            raise ValueError("Esse arquivo não está no conjunto permitido de leitura.")
         if b"\x00" in raw:
             raise ValueError("Arquivo binário não pode ser lido por esta ferramenta.")
         text = raw.decode("utf-8-sig")
@@ -594,7 +595,7 @@ BRANCH_EDIT_TOOLS: list[dict[str, Any]] = [
     {
         "name": "run_branch_checks",
         "title": "Executar verificações fixas da branch",
-        "description": "Executa os testes unittest de lotomaster/tests, parsing de sintaxe Python sem gerar bytecode, node --check em dois arquivos JS fixos e git diff --check. Disponível somente via stdio com opt-in, na branch autorizada; usa banco temporário e ambiente sem chaves do processo.",
+        "description": "Executa os testes unittest de lotomaster/tests (que podem executar código/testes com acesso à rede), parsing em memória dos arquivos Python seguros listados pelo MCP sem gerar bytecode, node --check em dois arquivos JS fixos e git diff --check. Disponível somente via stdio com opt-in, na branch autorizada; usa banco temporário e ambiente filho sem credenciais de provedor.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
     },
@@ -914,10 +915,16 @@ def _read_project_file_bytes(relative: Path) -> bytes:
         before = os.fstat(file_fd)
         if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
             raise ValueError("Só é permitido ler arquivo regular sem links adicionais.")
+        path_before = os.stat(relative.parts[-1], dir_fd=parent_fd, follow_symlinks=False)
+        if (path_before.st_dev, path_before.st_ino) != (before.st_dev, before.st_ino) or path_before.st_nlink != 1:
+            raise ValueError("Arquivo mudou durante a abertura segura.")
         if before.st_size > MAX_PROJECT_FILE_BYTES:
             raise ValueError("O arquivo excede o limite de tamanho permitido.")
         raw = _read_fd_limited(file_fd)
         after = os.fstat(file_fd)
+        path_after = os.stat(relative.parts[-1], dir_fd=parent_fd, follow_symlinks=False)
+        if (path_after.st_dev, path_after.st_ino) != (after.st_dev, after.st_ino) or path_after.st_nlink != 1:
+            raise ValueError("Arquivo mudou durante a leitura segura.")
         before_signature = (
             before.st_dev, before.st_ino, before.st_mode, before.st_nlink,
             before.st_size, before.st_mtime_ns, before.st_ctime_ns,
@@ -926,7 +933,7 @@ def _read_project_file_bytes(relative: Path) -> bytes:
             after.st_dev, after.st_ino, after.st_mode, after.st_nlink,
             after.st_size, after.st_mtime_ns, after.st_ctime_ns,
         )
-        if len(raw) > MAX_PROJECT_FILE_BYTES or len(raw) != before.st_size or before_signature != after_signature:
+        if len(raw) > MAX_PROJECT_FILE_BYTES or len(raw) != before.st_size or before_signature != after_signature or after.st_nlink != 1:
             raise ValueError("O arquivo mudou durante a leitura segura.")
         return raw
     except ValueError:
@@ -2100,7 +2107,7 @@ def _run_branch_checks(transport: str) -> dict[str, Any]:
             ]
             for relative in python_files:
                 source = (REPO_ROOT / relative).read_bytes().decode("utf-8-sig")
-                ast.parse(source, filename=relative)
+                compile(source, relative, "exec", ast.PyCF_ONLY_AST, dont_inherit=True)
             checks.append({"check": "python_syntax", "passed": True, "files_checked": len(python_files)})
         except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
             checks.append({"check": "python_syntax", "passed": False, "output_excerpt": "Erro de sintaxe ou arquivo Python inacessível."})
@@ -2220,6 +2227,8 @@ def _dispatch(message: Any, *, transport: str = "unknown") -> dict[str, Any] | N
         return _jsonrpc_error(message.get("id") if isinstance(message, dict) else None, -32600, "Invalid Request")
     request_id = message.get("id")
     is_notification = "id" not in message
+    if not is_notification and (isinstance(request_id, bool) or not isinstance(request_id, (str, int))):
+        return _jsonrpc_error(None, -32600, "Invalid Request")
     method = message.get("method")
     if not isinstance(method, str):
         if is_notification:
@@ -2273,6 +2282,8 @@ def _dispatch(message: Any, *, transport: str = "unknown") -> dict[str, Any] | N
                 )
                 text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
                 result = {"content": [{"type": "text", "text": text}], "structuredContent": value, "isError": False}
+            except RecursionError:
+                return _jsonrpc_error(request_id, -32603, "Internal error")
             except (ValueError, KeyError) as exc:
                 message_text = str(exc) if isinstance(exc, ValueError) else "Modalidade não encontrada."
                 result = {"content": [{"type": "text", "text": message_text}], "isError": True}
@@ -2421,10 +2432,13 @@ class MCPHandler(BaseHTTPRequestHandler):
                 return
             decoded = raw.decode("utf-8")
             message = json.loads(decoded)
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
             self._http_error(400, "JSON inválido.")
             return
-        response = _dispatch(message, transport="http")
+        try:
+            response = _dispatch(message, transport="http")
+        except RecursionError:
+            response = _jsonrpc_error(None, -32603, "Internal error")
         if response is None:
             self._send(202)
             return
@@ -2490,8 +2504,14 @@ class BoundedMCPHTTPServer(ThreadingHTTPServer):
 
 def serve_stdio(input_stream=None, output_stream=None) -> None:
     """Serve MCP stdio local; stdout contém somente respostas JSON-RPC por linha."""
-    input_stream = input_stream if input_stream is not None else sys.stdin
-    output_stream = output_stream if output_stream is not None else sys.stdout
+    if input_stream is None:
+        input_stream = sys.stdin
+        if hasattr(input_stream, "reconfigure"):
+            input_stream.reconfigure(encoding="utf-8", errors="strict")
+    if output_stream is None:
+        output_stream = sys.stdout
+        if hasattr(output_stream, "reconfigure"):
+            output_stream.reconfigure(encoding="utf-8", errors="strict")
     while True:
         line = input_stream.readline(MAX_BODY_BYTES + 2)
         if line == "":
@@ -2505,10 +2525,13 @@ def serve_stdio(input_stream=None, output_stream=None) -> None:
         else:
             try:
                 message = json.loads(line)
-            except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError, RecursionError):
                 response = _jsonrpc_error(None, -32700, "Parse error")
             else:
-                response = _dispatch(message, transport="stdio")
+                try:
+                    response = _dispatch(message, transport="stdio")
+                except RecursionError:
+                    response = _jsonrpc_error(None, -32603, "Internal error")
         if response is not None:
             output_stream.write(json.dumps(response, ensure_ascii=False, separators=(",", ":")) + "\n")
             output_stream.flush()

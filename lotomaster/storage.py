@@ -1,5 +1,6 @@
 """Persistência local e independente para o histórico oficial da Lotomaster."""
 import json
+import math
 import os
 import sqlite3
 import threading
@@ -55,7 +56,9 @@ def initialize():
 
 def save_draw(draw: dict) -> None:
     initialize()
-    payload = json.dumps(draw, ensure_ascii=False, separators=(",", ":"))
+    payload = json.dumps(draw, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    if len(payload.encode("utf-8")) > MAX_PAYLOAD_BYTES:
+        raise ValueError("Concurso excede o limite de armazenamento do cache.")
     with _connect() as conn:
         conn.execute(
             """INSERT INTO lottery_draws(game, contest, draw_date, payload, updated_at)
@@ -81,6 +84,9 @@ def _valid_row(game, row):
         draw = json.loads(row["payload"])
         checked = validate_draw(game, draw, require_game=True, require_special=True)
         if checked["contest"] != row["contest"]:
+            return None
+        estimated_prize = draw.get("estimated_prize")
+        if isinstance(estimated_prize, float) and not math.isfinite(estimated_prize):
             return None
         return {**{k: v for k, v in draw.items() if k not in {"_latest_checked_at", "_known_latest_contest", "source", "warning"}}, **checked}
     except (ValueError, TypeError, KeyError, OverflowError, RecursionError):

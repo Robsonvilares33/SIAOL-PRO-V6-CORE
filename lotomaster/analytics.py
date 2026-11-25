@@ -332,6 +332,7 @@ def _lotomania_grid_summary(rows: list[list[int]]) -> dict:
 def _special_distribution(key: str, draws: list[dict]) -> dict:
     months = Counter()
     teams = Counter()
+    team_display = {}
     trevos = Counter()
     trevo_pairs = Counter()
     trevo_orders = Counter()
@@ -340,7 +341,10 @@ def _special_distribution(key: str, draws: list[dict]) -> dict:
         if month:
             months[month.get("name") or str(month.get("number"))] += 1
         if draw.get("team"):
-            teams[draw["team"]] += 1
+            display = " ".join(str(draw["team"]).split())
+            identity = display.casefold()
+            teams[identity] += 1
+            team_display.setdefault(identity, display)
         values = draw.get("trevos", [])
         trevos.update(values)
         if len(values) >= 2:
@@ -398,11 +402,10 @@ def _special_distribution(key: str, draws: list[dict]) -> dict:
         }
     if key == "timemania":
         gaps = []
-        team_names = set(teams)
-        for team in team_names:
-            gap = next((i for i, draw in enumerate(draws) if draw.get("team") == team), len(draws))
-            gaps.append({"team": team, "draws_since_hit": gap, "count": teams[team]})
-        result["teams"] = {"counts": [{"team": name, "count": count} for name, count in teams.most_common(20)], "distinct": len(teams)}
+        for identity, display in team_display.items():
+            gap = next((i for i, draw in enumerate(draws) if " ".join(str(draw.get("team", "")).split()).casefold() == identity), len(draws))
+            gaps.append({"team": display, "draws_since_hit": gap, "count": teams[identity]})
+        result["teams"] = {"counts": [{"team": team_display[identity], "count": count} for identity, count in teams.most_common(20)], "distinct": len(teams)}
         result["team_gaps"] = {"items": sorted(gaps, key=lambda row: (-row["draws_since_hit"], row["team"]))[:20]}
     if key == "maismilionaria":
         result["trevos"] = {"counts": [{"trevo": n, "count": trevos[n]} for n in range(1, 7)], "pairs": [{"trevos": list(pair), "count": count} for pair, count in trevo_pairs.most_common()]}

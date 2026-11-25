@@ -138,3 +138,23 @@ def test_bounded_window_and_oversized_or_fractional_keys(db, monkeypatch):
     assert [x['contest'] for x in storage.list_draws_range('megasena', 1, 2)] == [1]
     with pytest.raises(ValueError, match='excessiva'):
         storage.list_draws_range('megasena', 1, 501)
+
+
+def test_save_draw_rejects_non_finite_prize_before_upsert(db):
+    poisoned = {**draw(1), 'estimated_prize': float('nan')}
+    with pytest.raises(ValueError):
+        storage.save_draw(poisoned)
+    assert storage.get_draw('megasena', 1) is None
+
+
+def test_read_discards_legacy_row_with_non_finite_prize(db):
+    insert(1, json.dumps({**draw(1), 'estimated_prize': float('inf')}))
+    assert storage.get_draw('megasena', 1) is None
+
+
+def test_save_draw_rejects_oversized_payload_before_upsert(db, monkeypatch):
+    monkeypatch.setattr(storage, 'MAX_PAYLOAD_BYTES', 100)
+    oversized = {**draw(1), 'description': 'x' * 200}
+    with pytest.raises(ValueError, match='limite de armazenamento'):
+        storage.save_draw(oversized)
+    assert storage.get_draw('megasena', 1) is None

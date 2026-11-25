@@ -110,7 +110,7 @@ class MCPHTTPTests(unittest.TestCase):
         })
         self.assertEqual(status, 200)
         initialize = json.loads(body)["result"]
-        self.assertEqual(initialize["protocolVersion"], "2025-03-26")
+        self.assertEqual(initialize["protocolVersion"], "2024-11-05")
         self.assertIn("tools", initialize["capabilities"])
         status, _, body = self.post({
             "jsonrpc": "2.0", "id": 9, "method": "initialize",
@@ -164,7 +164,31 @@ class MCPHTTPTests(unittest.TestCase):
         status, _, _ = self.post({"jsonrpc": "2.0", "id": 1, "method": "ping"}, token="é" + "a" * 40)
         self.assertEqual(status, 401)
 
+    def test_initialize_does_not_negotiate_batching_protocol_versions(self):
+        for requested in ("2025-03-26", "2025-06-18", "2025-11-25"):
+            response = mcp_server._dispatch({
+                "jsonrpc": "2.0", "id": 19, "method": "initialize",
+                "params": {"protocolVersion": requested},
+            }, transport="http")
+            self.assertEqual(response["result"]["protocolVersion"], "2024-11-05")
+    def test_http_rejects_invalid_request_ids_and_handles_recursion(self):
+        for invalid in (None, True, 1.5, [], {}):
+            with self.subTest(invalid=invalid):
+                status, _, body = self.post({"jsonrpc": "2.0", "id": invalid, "method": "ping"})
+                self.assertEqual(status, 200)
+                response = json.loads(body)
+                self.assertEqual(response["error"]["code"], -32600)
+                self.assertIsNone(response["id"])
+        status, _, body = self.post({"jsonrpc": "2.0", "id": "ok", "method": "ping"})
+        self.assertEqual(json.loads(body)["id"], "ok")
+        with patch.object(mcp_server, "_dispatch", side_effect=RecursionError):
+            status, _, body = self.post({"jsonrpc": "2.0", "id": 4, "method": "ping"})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["error"]["code"], -32603)
     def test_json_integer_digit_limit_returns_controlled_http_error(self):
+        previous_limit = sys.get_int_max_str_digits()
+        self.addCleanup(sys.set_int_max_str_digits, previous_limit)
+        sys.set_int_max_str_digits(640)
         body = b'{"jsonrpc":"2.0","id":' + b"9" * 5000 + b',"method":"ping"}'
         connection = http.client.HTTPConnection(self.host, self.port, timeout=5)
         connection.request("POST", mcp_server.MCP_PATH, body, {
@@ -178,6 +202,21 @@ class MCPHTTPTests(unittest.TestCase):
 
 
 class MCPReadOnlyTests(unittest.TestCase):
+    def test_multiline_secret_redaction_masks_every_line(self):
+        secret = 'api_key = "first-line-secret\nsecond-line-secret\nthird-line-secret"'
+        redacted = mcp_server._redact_sensitive_text(secret)
+        for line in ("first-line-secret", "second-line-secret", "third-line-secret"):
+            self.assertNotIn(line, redacted)
+        self.assertIn("[REDACTED]", redacted)
+    def test_syntax_check_compiles_source_in_memory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "lotomaster").mkdir()
+            (root / "lotomaster" / "valid.py").write_text("x = 1\n", encoding="utf-8")
+            with patch.object(mcp_server, "REPO_ROOT", root):
+                tree = compile("x = 1\n", "valid.py", "exec", __import__("ast").PyCF_ONLY_AST, dont_inherit=True)
+                self.assertIsNotNone(tree)
+            self.assertFalse(list(root.rglob("*.pyc")))
     def test_read_project_file_omits_digest_without_edit_authorization(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -295,6 +334,8 @@ class MCPReadOnlyTests(unittest.TestCase):
                     mcp_server._tool_result("read_project_file", {"path": "linked/private.py"})
                 with self.assertRaisesRegex(ValueError, "links adicionais"):
                     mcp_server._tool_result("read_project_file", {"path": "hardlink.py"})
+                with self.assertRaisesRegex(ValueError, "links adicionais"):
+                    mcp_server._read_project_file_bytes(Path("hardlink.py"))
 
     def test_redaction_covers_auth_headers_and_query_tokens(self):
         secret = "generic_token_value_0123456789abcdefghijklmnopqrstuvwxyz"
@@ -454,7 +495,48 @@ class MCPReadOnlyTests(unittest.TestCase):
         self.assertEqual(responses[0]["result"]["serverInfo"]["name"], "lotomaster-mcp")
         self.assertEqual(len(responses[1]["result"]["tools"]), 9)
 
+    def test_stdio_default_streams_are_configured_as_utf8(self):
+        class FakeStream:
+            def __init__(self, input_text=""):
+                self.input_text = input_text
+                self.output_text = ""
+                self.configured = None
+            def reconfigure(self, **kwargs):
+                self.configured = kwargs
+            def readline(self, _limit):
+                line, separator, remaining = self.input_text.partition("\n")
+                if not separator:
+                    self.input_text = ""
+                    return line
+                self.input_text = remaining
+                return line + separator
+            def write(self, text):
+                self.output_text += text
+            def flush(self):
+                return None
+        source, destination = FakeStream('{"jsonrpc":"2.0","id":1,"method":"ping"}\n'), FakeStream()
+        with patch.object(mcp_server.sys, "stdin", source), patch.object(mcp_server.sys, "stdout", destination):
+            mcp_server.serve_stdio()
+        self.assertEqual(source.configured, {"encoding": "utf-8", "errors": "strict"})
+        self.assertEqual(destination.configured, {"encoding": "utf-8", "errors": "strict"})
+        self.assertEqual(json.loads(destination.output_text)["id"], 1)
+    def test_stdio_rejects_invalid_ids_and_recursion_does_not_stop_stream(self):
+        payload = '{"jsonrpc":"2.0","id":true,"method":"ping"}\n'
+        payload += '{"jsonrpc":"2.0","id":2,"method":"ping"}\n'
+        output = io.StringIO()
+        mcp_server.serve_stdio(io.StringIO(payload), output)
+        responses = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(responses[0]["error"]["code"], -32600)
+        self.assertEqual(responses[1]["id"], 2)
+        deep = '{"jsonrpc":"2.0","id":3,"method":"ping","params":' + '[' * 1200 + '0' + ']' * 1200 + '}\n'
+        output = io.StringIO()
+        mcp_server.serve_stdio(io.StringIO(deep + '{"jsonrpc":"2.0","id":4,"method":"ping"}\n'), output)
+        responses = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(responses[-1]["id"], 4)
     def test_stdio_json_integer_digit_limit_does_not_stop_next_line(self):
+        previous_limit = sys.get_int_max_str_digits()
+        self.addCleanup(sys.set_int_max_str_digits, previous_limit)
+        sys.set_int_max_str_digits(640)
         payload = '{"jsonrpc":"2.0","id":' + "9" * 5000 + ',"method":"ping"}\n'
         payload += '{"jsonrpc":"2.0","id":2,"method":"ping"}\n'
         output = io.StringIO()
@@ -639,6 +721,24 @@ class MCPBranchEditTests(unittest.TestCase):
         self.assertIn("tipo não permitido", result.stdout)
         self.assertTrue(target.exists())
 
+    def test_review_preserves_listed_path_with_newline_in_git_status(self):
+        temporary, root, _ = self._repo()
+        self.addCleanup(temporary.cleanup)
+        unusual = "lotomaster/line\nbreak.py"
+        target = root / unusual
+        target.write_text("before\n", encoding="utf-8")
+        self._git(root, "add", "--", unusual)
+        self._git(root, "commit", "-q", "-m", "add unusual safe path")
+        target.write_text("after\n", encoding="utf-8")
+        with patch.object(mcp_server, "REPO_ROOT", root), patch.dict(
+            os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"},
+        ):
+            listed = {item["path"] for item in mcp_server._project_file_index()}
+            changed, excluded, _count, statuses = mcp_server._safe_changed_paths()
+        self.assertIn(unusual, listed)
+        self.assertIn(unusual, changed)
+        self.assertIn(unusual, statuses)
+        self.assertNotIn(unusual, excluded)
     def test_review_separates_staged_and_unstaged_changes_and_keeps_safe_deletions(self):
         temporary, root, target = self._repo()
         self.addCleanup(temporary.cleanup)

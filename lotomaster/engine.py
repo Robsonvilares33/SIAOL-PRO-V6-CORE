@@ -1,5 +1,5 @@
 """Serviços de negócio da Lotomaster: histórico oficial, geração e conferência de jogos."""
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import logging
 from math import comb, isfinite, prod
 from datetime import datetime, timezone
@@ -15,9 +15,76 @@ from .client_draws import validate_client_draws
 from . import storage
 
 _LATEST_TTL_SECONDS = 90
+_GAP_FILL_BUDGET_SECONDS = 10.0
+_GAP_FILL_WORKERS = 5
 logger = logging.getLogger(__name__)
 _latest_cache: dict[str, tuple[float, dict]] = {}
 _latest_lock = threading.Lock()
+_latest_condition = threading.Condition(_latest_lock)
+_latest_refresh_counts: dict[str, int] = {}
+_gap_fill_pool = ThreadPoolExecutor(max_workers=_GAP_FILL_WORKERS, thread_name_prefix="lotomaster-gap-fill")
+_gap_fill_slots = threading.BoundedSemaphore(_GAP_FILL_WORKERS)
+
+
+def _fetch_and_save_gap(key: str, contest: int) -> None:
+    try:
+        draw = fetch_draw(key, contest)
+        if int(draw.get("contest", 0)) != contest:
+            return
+        storage.save_draw(draw)
+    except Exception:
+        logger.debug("Não foi possível preencher o concurso %s de %s", contest, key)
+
+
+def _fill_missing_draws(key: str, contests: list[int]) -> None:
+    deadline = time.monotonic() + _GAP_FILL_BUDGET_SECONDS
+    pending = set()
+    next_index = 0
+    while time.monotonic() < deadline:
+        while len(pending) < _GAP_FILL_WORKERS and next_index < len(contests):
+            if not _gap_fill_slots.acquire(blocking=False):
+                break
+            contest = contests[next_index]
+            next_index += 1
+            try:
+                future = _gap_fill_pool.submit(_fetch_and_save_gap, key, contest)
+            except Exception:
+                _gap_fill_slots.release()
+                raise
+            future.add_done_callback(lambda _future: _gap_fill_slots.release())
+            pending.add(future)
+        if not pending:
+            break
+        completed, pending = wait(
+            pending, timeout=max(0.0, deadline - time.monotonic()),
+            return_when=FIRST_COMPLETED,
+        )
+        if not completed:
+            break
+    for future in pending:
+        future.cancel()
+
+
+def _contest_number(draw: dict | None) -> int:
+    try:
+        return int(draw["contest"]) if draw else 0
+    except (KeyError, TypeError, ValueError):
+        return 0
+
+
+def _stale_latest(draw: dict, known_contest: int, *, older_upstream: bool = False) -> dict:
+    fallback_warning = "A CAIXA está temporariamente indisponível; o resultado em cache pode estar desatualizado."
+    if older_upstream:
+        fallback_warning = (
+            "A CAIXA está temporariamente indisponível ou retornou um concurso mais antigo; "
+            "o resultado em cache pode estar desatualizado."
+        )
+    return {
+        **draw,
+        "_known_latest_contest": max(known_contest, _contest_number(draw)),
+        "source": "cache",
+        "warning": fallback_warning,
+    }
 
 
 def latest_result(game: str, refresh: bool = True) -> dict:
@@ -28,58 +95,91 @@ def latest_result(game: str, refresh: bool = True) -> dict:
         cached_mem = _latest_cache.get(key)
     if not refresh and cached_mem and 0 <= now - cached_mem[0] < _LATEST_TTL_SECONDS:
         return {**cached_mem[1], "source": "cache"}
+
+    with _latest_condition:
+        _latest_refresh_counts[key] = _latest_refresh_counts.get(key, 0) + 1
+    try:
+        return _refresh_latest(key, now, cached_mem)
+    finally:
+        with _latest_condition:
+            remaining = _latest_refresh_counts.get(key, 1) - 1
+            if remaining <= 0:
+                _latest_refresh_counts.pop(key, None)
+            else:
+                _latest_refresh_counts[key] = remaining
+            _latest_condition.notify_all()
+
+
+def _refresh_latest(key: str, now: float, cached_mem: tuple[float, dict] | None) -> dict:
     try:
         draw = fetch_draw(key)
         try:
             storage.save_draw(draw)
         except Exception:
             logger.error("Não foi possível persistir o resultado consultado para %s", key)
+        try:
+            cached_db_after = storage.latest_draw(key)
+        except Exception:
+            cached_db_after = None
         checked_at = datetime.now(timezone.utc).isoformat()
-        draw = {**draw, "_latest_checked_at": checked_at}
         with _latest_lock:
             concurrent_mem = _latest_cache.get(key)
-            if (
-                concurrent_mem is not None
-                and concurrent_mem[1].get("_latest_checked_at")
-                and int(concurrent_mem[1]["contest"]) > int(draw["contest"])
-            ):
-                return {**concurrent_mem[1], "source": "CAIXA via Cloudflare Worker"}
-            _latest_cache[key] = (now, draw)
-        return {**draw, "source": "CAIXA via Cloudflare Worker"}
+            known_draws = [draw, cached_db_after]
+            if cached_mem is not None:
+                known_draws.append(cached_mem[1])
+            if concurrent_mem is not None:
+                known_draws.append(concurrent_mem[1])
+            known_contest = max((_contest_number(item) for item in known_draws), default=0)
+            newest_known = max(known_draws, key=_contest_number)
+            if known_contest > _contest_number(draw):
+                stale = _stale_latest(newest_known, known_contest, older_upstream=True)
+                _latest_cache[key] = (now, stale)
+                return stale
+            fresh = {
+                **draw,
+                "_latest_checked_at": checked_at,
+                "_known_latest_contest": known_contest,
+            }
+            _latest_cache[key] = (now, fresh)
+        return {**fresh, "source": "CAIXA via Cloudflare Worker"}
     except Exception:
-        cached_db = storage.latest_draw(key)
-        fallback_warning = (
-            "A CAIXA está temporariamente indisponível; "
-            "o resultado em cache pode estar desatualizado."
-        )
+        try:
+            cached_db = storage.latest_draw(key)
+        except Exception:
+            cached_db = None
         stale = None
         if cached_db:
             cached_db = {k: v for k, v in cached_db.items() if k not in {"_latest_checked_at", "_known_latest_contest"}}
-            stale = {
-                **cached_db,
-                "source": "cache",
-                "warning": fallback_warning,
-            }
+            stale = _stale_latest(cached_db, _contest_number(cached_db))
         with _latest_lock:
             concurrent_mem = _latest_cache.get(key)
             if concurrent_mem is not None and concurrent_mem is not cached_mem:
                 current_draw = concurrent_mem[1]
-                if current_draw.get("_latest_checked_at"):
+                if current_draw.get("_latest_checked_at") and _contest_number(current_draw) >= _contest_number(stale):
                     return {**current_draw, "source": "CAIXA via Cloudflare Worker"}
-                return {**current_draw, "source": "cache"}
-            if (
-                concurrent_mem is not None
-                and concurrent_mem[1].get("_latest_checked_at")
-                and (stale is None or int(concurrent_mem[1]["contest"]) >= int(stale["contest"]))
-            ):
-                return {
-                    **concurrent_mem[1],
-                    "source": "cache",
-                    "warning": fallback_warning,
-                }
+            candidates = [item for item in (stale, cached_mem[1] if cached_mem else None, concurrent_mem[1] if concurrent_mem else None) if item]
+            if candidates:
+                newest_known = max(candidates, key=_contest_number)
+                known_contest = max(_contest_number(item) for item in candidates)
+                stale = _stale_latest(newest_known, known_contest)
+                if not any(newest_known is memory[1] for memory in (cached_mem, concurrent_mem) if memory):
+                    _latest_cache[key] = (now, stale)
+                return stale
             if stale is not None:
                 _latest_cache[key] = (now, stale)
                 return stale
+
+            # A simultaneous refresh may still be committing a valid response.
+            # Give it a short, bounded chance to populate memory before failing.
+            deadline = time.monotonic() + 0.25
+            while _latest_refresh_counts.get(key, 0) > 1 and time.monotonic() < deadline:
+                _latest_condition.wait(timeout=max(0.0, deadline - time.monotonic()))
+                concurrent_mem = _latest_cache.get(key)
+                if concurrent_mem is not None and concurrent_mem is not cached_mem:
+                    current_draw = concurrent_mem[1]
+                    if current_draw.get("_latest_checked_at"):
+                        return {**current_draw, "source": "CAIXA via Cloudflare Worker"}
+                    return _stale_latest(current_draw, _contest_number(current_draw))
         raise RuntimeError("Não foi possível consultar a CAIXA.") from None
 
 
@@ -103,13 +203,7 @@ def list_results(game: str, limit: int = 20, refresh_latest: bool = True) -> lis
         # Retry only gaps inside the known, bounded recent contest window.
         target_contests = [n for n in range(current_contest, max(0, current_contest - limit), -1) if n not in have]
         if target_contests:
-            with ThreadPoolExecutor(max_workers=5) as pool:
-                futures = {pool.submit(fetch_draw, key, contest): contest for contest in target_contests}
-                for future in as_completed(futures):
-                    try:
-                        storage.save_draw(future.result())
-                    except Exception:
-                        continue
+            _fill_missing_draws(key, target_contests)
     results = storage.list_draws_range(key, lower, current_contest)
     # Do not fill gaps in the requested recent window with older cached rows.
     if latest:
@@ -157,15 +251,13 @@ def list_history_page(game: str, limit: int = 100, before: int | None = None) ->
     have = {int(draw["contest"]) for draw in cached}
     missing = [contest for contest in range(upper, lower - 1, -1) if contest not in have]
     if missing:
-        with ThreadPoolExecutor(max_workers=5) as pool:
-            futures = {pool.submit(fetch_draw, key, contest): contest for contest in missing}
-            for future in as_completed(futures):
-                try:
-                    storage.save_draw(future.result())
-                except Exception:
-                    continue
+        _fill_missing_draws(key, missing)
 
     items = storage.list_draws_range(key, lower, upper)
+    if lower <= int(latest["contest"]) <= upper:
+        items_by_contest = {int(draw["contest"]): draw for draw in items}
+        items_by_contest[int(latest["contest"])] = latest
+        items = sorted(items_by_contest.values(), key=lambda draw: int(draw["contest"]), reverse=True)
     returned = {int(draw["contest"]) for draw in items}
     missing_after_fetch = [contest for contest in range(upper, lower - 1, -1) if contest not in returned]
     return {
@@ -210,8 +302,8 @@ def generate_tickets(game: str, options: dict | None = None) -> list[dict]:
                 fixed = sorted(set(_int_list(raw.get("fixed", []))))
                 excluded = set(_int_list(raw.get("excluded", [])))
                 pick_count = int(raw.get("pick_count", 1))
-                if pick_count < 1 or pick_count > 10:
-                    raise ValueError("Cada coluna do Super Sete deve conter de 1 a 10 opções.")
+                if pick_count < 1 or pick_count > 3:
+                    raise ValueError("Cada coluna do Super Sete deve conter de 1 a 3 opções.")
                 if any(n < 0 or n > 9 for n in fixed + list(excluded)) or set(fixed) & excluded or len(fixed) > pick_count:
                     raise ValueError(f"Fixos/removidos inválidos na coluna {column}.")
                 available = [n for n in range(10) if n not in excluded and n not in fixed]
@@ -225,6 +317,15 @@ def generate_tickets(game: str, options: dict | None = None) -> list[dict]:
                         raise ValueError(f"O filtro Pareto histórico não deixa dígitos suficientes na coluna {column}.")
                 chosen = fixed + rng.sample(available, pick_count - len(fixed))
                 columns.append(sorted(chosen))
+            column_counts = [len(column) for column in columns]
+            total_choices = sum(column_counts)
+            valid_multiple = (
+                total_choices == 7 and all(count == 1 for count in column_counts)
+                or 8 <= total_choices <= 14 and all(1 <= count <= 2 for count in column_counts)
+                or 15 <= total_choices <= 21 and all(2 <= count <= 3 for count in column_counts)
+            )
+            if not valid_multiple:
+                raise ValueError("A aposta múltipla do Super Sete deve ter 7 opções simples, 8–14 com 1–2 por coluna ou 15–21 com 2–3 por coluna.")
             generated.append(_ticket_summary(spec, {"columns": columns, "numbers": [c[0] for c in columns]}, ticket_index + 1, previous))
         return generated
 
@@ -717,8 +818,17 @@ def _validate_ticket(spec: dict, ticket: dict) -> None:
             raise ValueError("O Super Sete precisa de sete colunas, na ordem do volante.")
         for index, values in enumerate(columns, 1):
             digits = _int_list(values)
-            if not digits or len(digits) > 10 or len(set(digits)) != len(digits) or any(n < 0 or n > 9 for n in digits):
-                raise ValueError(f"A coluna {index} precisa ter de 1 a 10 dígitos distintos entre 0 e 9.")
+            if not digits or len(digits) > 3 or len(set(digits)) != len(digits) or any(n < 0 or n > 9 for n in digits):
+                raise ValueError(f"A coluna {index} precisa ter de 1 a 3 dígitos distintos entre 0 e 9.")
+        column_counts = [len(_int_list(values)) for values in columns]
+        total_choices = sum(column_counts)
+        valid_multiple = (
+            total_choices == 7 and all(count == 1 for count in column_counts)
+            or 8 <= total_choices <= 14 and all(1 <= count <= 2 for count in column_counts)
+            or 15 <= total_choices <= 21 and all(2 <= count <= 3 for count in column_counts)
+        )
+        if not valid_multiple:
+            raise ValueError("A aposta múltipla do Super Sete deve ter 7 opções simples, 8–14 com 1–2 por coluna ou 15–21 com 2–3 por coluna.")
         return
     numbers = _int_list(ticket.get("numbers", []))
     if len(set(numbers)) != len(numbers):

@@ -239,6 +239,7 @@ class LatestResultCacheTests(unittest.TestCase):
 
         with (
             patch("lotomaster.engine.fetch_draw", side_effect=fetch_draw),
+            patch("lotomaster.engine.storage.latest_draw", return_value=None),
             patch("lotomaster.engine.storage.save_draw", side_effect=save_draw),
         ):
             thread = threading.Thread(target=run_delayed_refresh, name="delayed-refresh")
@@ -271,6 +272,52 @@ class LatestResultCacheTests(unittest.TestCase):
         self.assertEqual(fast_result["contest"], 100)
         self.assertEqual(delayed_result["contest"], 101)
         self.assertEqual(engine._latest_cache["megasena"][1]["contest"], 101)
+
+    def test_gap_fill_returns_within_budget_when_upstream_stalls(self):
+        entered = threading.Event()
+        release = threading.Event()
+        all_saved = threading.Event()
+        saved = 0
+        saved_lock = threading.Lock()
+
+        def stalled_fetch(_game, contest):
+            entered.set()
+            release.wait(timeout=2)
+            return {"contest": contest}
+
+        def save(_draw):
+            nonlocal saved
+            with saved_lock:
+                saved += 1
+                if saved == engine._GAP_FILL_WORKERS:
+                    all_saved.set()
+
+        with patch("lotomaster.engine._GAP_FILL_BUDGET_SECONDS", 0.05), \
+             patch("lotomaster.engine.fetch_draw", side_effect=stalled_fetch), \
+             patch("lotomaster.engine.storage.save_draw", side_effect=save):
+            started = time.monotonic()
+            engine._fill_missing_draws("megasena", list(range(1, 20)))
+            elapsed = time.monotonic() - started
+            self.assertTrue(entered.is_set())
+            self.assertLess(elapsed, 0.75)
+            release.set()
+            self.assertTrue(all_saved.wait(timeout=1))
+
+    def test_history_page_includes_valid_latest_when_storage_did_not_persist_it(self):
+        latest = {
+            "contest": 101,
+            "numbers": [4, 5, 6],
+            "_known_latest_contest": 101,
+            "_latest_checked_at": "2026-11-25T00:00:00+00:00",
+            "source": "CAIXA via Cloudflare Worker",
+        }
+        with patch("lotomaster.engine.latest_result", return_value=latest), \
+             patch("lotomaster.engine.storage.list_draws_range", return_value=[]), \
+             patch("lotomaster.engine._fill_missing_draws"):
+            page = engine.list_history_page("megasena", limit=1)
+
+        self.assertEqual([draw["contest"] for draw in page["items"]], [101])
+        self.assertEqual(page["items"][0]["numbers"], [4, 5, 6])
 
 
 if __name__ == "__main__":
