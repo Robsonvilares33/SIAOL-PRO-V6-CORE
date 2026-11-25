@@ -193,9 +193,10 @@ class LatestResultCacheTests(unittest.TestCase):
             return fresh
 
         def latest_draw(_game):
-            sqlite_read_started.set()
-            if not release_sqlite_read.wait(timeout=3):
-                raise TimeoutError("SQLite test barrier timed out")
+            if threading.current_thread().name == "stale-refresh":
+                sqlite_read_started.set()
+                if not release_sqlite_read.wait(timeout=3):
+                    raise TimeoutError("SQLite test barrier timed out")
             return cached_db
 
         def run_stale_refresh():
@@ -284,10 +285,72 @@ class LatestResultCacheTests(unittest.TestCase):
         self.assertEqual(delayed_result["contest"], 101)
         self.assertEqual(engine._latest_cache["megasena"][1]["contest"], 101)
 
+    def test_older_success_after_concurrent_newer_publication_is_not_stale(self):
+        old = {"contest": 100, "numbers": [1, 2, 3]}
+        fresh = {"contest": 101, "numbers": [4, 5, 6]}
+        old_reading_db = threading.Event()
+        release_old = threading.Event()
+        outcome = {}
+        def fetch(_game):
+            return old if threading.current_thread().name == "old-refresh" else fresh
+        def latest_draw(_game):
+            if threading.current_thread().name == "old-refresh":
+                old_reading_db.set()
+                if not release_old.wait(timeout=3):
+                    raise TimeoutError("old refresh barrier timed out")
+            return None
+        def run_old():
+            outcome["result"] = engine.latest_result("megasena", refresh=True)
+        with patch("lotomaster.engine.fetch_draw", side_effect=fetch), \
+             patch("lotomaster.engine.storage.save_draw"), \
+             patch("lotomaster.engine.storage.latest_draw", side_effect=latest_draw), \
+             patch("lotomaster.engine.logger.warning") as warning:
+            thread = threading.Thread(target=run_old, name="old-refresh")
+            thread.start()
+            try:
+                self.assertTrue(old_reading_db.wait(timeout=2))
+                newer = engine.latest_result("megasena", refresh=True)
+            finally:
+                release_old.set()
+                thread.join(timeout=3)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(newer["contest"], 101)
+        self.assertEqual(outcome["result"]["contest"], 101)
+        self.assertNotIn("warning", outcome["result"])
+        warning.assert_not_called()
+        self.assertEqual(engine._latest_cache["megasena"][1]["contest"], 101)
+
+    def test_checked_but_warning_bearing_concurrent_cache_is_not_worker_success(self):
+        warning_cache = {"contest": 101, "numbers": [1, 2, 3], "_latest_checked_at": "yesterday", "warning": "stale"}
+        entry = (time.monotonic(), warning_cache)
+        engine._latest_cache["megasena"] = entry
+        with patch("lotomaster.engine.fetch_draw", side_effect=OSError("offline")), \
+             patch("lotomaster.engine.storage.latest_draw", return_value={"contest": 100, "numbers": [4, 5, 6]}):
+            result = engine.latest_result("megasena", refresh=True)
+        self.assertEqual(result["source"], "cache")
+        self.assertIn("warning", result)
+        self.assertNotEqual(result["source"], "CAIXA via Cloudflare Worker")
+        self.assertIs(engine._latest_cache["megasena"], entry)
+
+    def test_wait_branch_preserves_warning_on_concurrent_cache(self):
+        warning_cache = {"contest": 101, "numbers": [1, 2, 3], "_latest_checked_at": "yesterday", "warning": "stale"}
+        entry = (time.monotonic(), warning_cache)
+        engine._latest_cache.clear()
+        engine._latest_refresh_counts["megasena"] = 2
+        def publish_warning_cache(*_args, **_kwargs):
+            engine._latest_cache["megasena"] = entry
+            engine._latest_refresh_counts["megasena"] = 1
+        with patch("lotomaster.engine.fetch_draw", side_effect=OSError("offline")), \
+             patch("lotomaster.engine.storage.latest_draw", return_value=None), \
+             patch.object(engine._latest_condition, "wait", side_effect=publish_warning_cache):
+            result = engine.latest_result("megasena", refresh=True)
+        self.assertEqual(result["source"], "cache")
+        self.assertIn("warning", result)
+        self.assertNotEqual(result["source"], "CAIXA via Cloudflare Worker")
+
     def test_gap_fill_returns_within_budget_when_upstream_stalls(self):
         entered = threading.Event()
         release = threading.Event()
-        all_saved = threading.Event()
         saved = 0
         saved_lock = threading.Lock()
 
@@ -300,8 +363,6 @@ class LatestResultCacheTests(unittest.TestCase):
             nonlocal saved
             with saved_lock:
                 saved += 1
-                if saved == engine._GAP_FILL_WORKERS:
-                    all_saved.set()
 
         futures = []
         pool = engine._gap_fill_pool
@@ -317,14 +378,21 @@ class LatestResultCacheTests(unittest.TestCase):
              patch("lotomaster.engine.fetch_draw", side_effect=stalled_fetch), \
              patch("lotomaster.engine.storage.save_draw", side_effect=save):
             started = time.monotonic()
-            engine._fill_missing_draws("megasena", list(range(1, 20)))
-            elapsed = time.monotonic() - started
-            self.assertTrue(entered.is_set())
-            self.assertLess(elapsed, 0.75)
-            release.set()
-            self.assertTrue(all_saved.wait(timeout=1))
-            for future in futures:
-                future.result(timeout=1)
+            deadline = started + 0.75
+            try:
+                engine._fill_missing_draws("megasena", list(range(1, 20)))
+                elapsed = time.monotonic() - started
+                self.assertTrue(entered.is_set())
+                self.assertLess(elapsed, 0.75)
+                self.assertLessEqual(started + elapsed, deadline)
+            finally:
+                release.set()
+                for future in futures:
+                    try:
+                        future.result(timeout=2)
+                    except Exception:
+                        if not future.cancelled():
+                            raise
 
     def test_gap_fill_worker_releases_slot_in_finally_before_returning(self):
         class CountingSlots:

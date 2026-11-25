@@ -67,7 +67,7 @@
       if (typeof draw.team!=='string' || !draw.team.trim() || draw.team.length>100) throw new Error('Time inválido.');
     } else if (draw.team != null) throw new Error('Time incompatível.');
     if (![draw.estimated_prize, draw.next_prize].every(value=>typeof value==='number'&&Number.isFinite(value)&&value>=0)) throw new Error('Valor monetário inválido.');
-    if (!Array.isArray(draw.winners_by_tier) || draw.winners_by_tier.some(tier=>
+    if (!Array.isArray(draw.winners_by_tier) || draw.winners_by_tier.length > 50 || draw.winners_by_tier.some(tier=>
       !tier || !Number.isSafeInteger(tier.winners) || tier.winners<0
       || typeof tier.prize!=='number' || !Number.isFinite(tier.prize) || tier.prize<0
     )) throw new Error('Rateio de prêmios inválido.');
@@ -93,7 +93,9 @@
     }
     const special = text(raw.nomeTimeCoracaoMesSorte);
     const monthNumber = item.key === 'diadesorte' && special ? (MONTHS[special.toLocaleLowerCase('pt-BR')] || null) : null;
-    const awards = (raw.listaRateioPremio || []).map(row => ({
+    const rateio = raw.listaRateioPremio;
+    if (rateio != null && (!Array.isArray(rateio) || rateio.length > 50)) throw new Error('Rateio de prêmios inválido.');
+    const awards = (rateio || []).map(row => ({
       label: text(row.descricaoFaixa) || 'Faixa',
       winners: Number(row.numeroDeGanhadores || 0),
       prize: Number(row.valorPremio || 0),
@@ -199,7 +201,18 @@
     const rows = retained
       .filter(row => Number(row.contest) >= first && Number(row.contest) <= Number(newest.contest))
       .slice(0, limit);
-    writeCache(cacheKey, retained.slice(0, 300).map(({ warning: _warning, ...row }) => row));
+    // Merge with the latest cache snapshot at write time. A request that began
+    // with a narrower view must not erase contests written by a concurrent one.
+    const currentRows = readCache(cacheKey);
+    const merged = new Map((Array.isArray(currentRows) ? currentRows : [])
+      .filter(row => validCached(item, row))
+      .map(row => [Number(row.contest), row]));
+    for (const row of retained) merged.set(Number(row.contest), row);
+    const finalCache = [...merged.values()]
+      .sort((a, b) => Number(b.contest) - Number(a.contest))
+      .slice(0, 300)
+      .map(({ warning: _warning, ...row }) => row);
+    writeCache(cacheKey, finalCache);
     if (!rows.length) throw new Error('Não foi possível obter concursos históricos da CAIXA.');
     const expected = Number(newest.contest) - first + 1;
     const partial = rows.length < expected;

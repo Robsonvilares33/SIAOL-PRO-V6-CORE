@@ -134,6 +134,10 @@ def _refresh_latest(key: str, now: float, cached_mem: tuple[float, dict] | None)
             known_contest = max((_contest_number(item) for item in known_draws), default=0)
             newest_known = max(known_draws, key=_contest_number)
             if known_contest > _contest_number(draw):
+                if concurrent_mem is not None and concurrent_mem is not cached_mem:
+                    concurrent_draw = concurrent_mem[1]
+                    if concurrent_draw.get("_latest_checked_at") and not concurrent_draw.get("warning") and _contest_number(concurrent_draw) >= _contest_number(draw):
+                        return {**concurrent_draw, "source": "CAIXA via Cloudflare Worker"}
                 stale = _stale_latest(newest_known, known_contest, older_upstream=True)
                 _latest_cache[key] = (now, stale)
                 return stale
@@ -157,7 +161,7 @@ def _refresh_latest(key: str, now: float, cached_mem: tuple[float, dict] | None)
             concurrent_mem = _latest_cache.get(key)
             if concurrent_mem is not None and concurrent_mem is not cached_mem:
                 current_draw = concurrent_mem[1]
-                if current_draw.get("_latest_checked_at") and _contest_number(current_draw) >= _contest_number(stale):
+                if current_draw.get("_latest_checked_at") and not current_draw.get("warning") and _contest_number(current_draw) >= _contest_number(stale):
                     return {**current_draw, "source": "CAIXA via Cloudflare Worker"}
             candidates = [item for item in (stale, cached_mem[1] if cached_mem else None, concurrent_mem[1] if concurrent_mem else None) if item]
             if candidates:
@@ -179,7 +183,7 @@ def _refresh_latest(key: str, now: float, cached_mem: tuple[float, dict] | None)
                 concurrent_mem = _latest_cache.get(key)
                 if concurrent_mem is not None and concurrent_mem is not cached_mem:
                     current_draw = concurrent_mem[1]
-                    if current_draw.get("_latest_checked_at"):
+                    if current_draw.get("_latest_checked_at") and not current_draw.get("warning"):
                         return {**current_draw, "source": "CAIXA via Cloudflare Worker"}
                     return _stale_latest(current_draw, _contest_number(current_draw))
         raise RuntimeError("Não foi possível consultar a CAIXA.") from None
@@ -292,6 +296,9 @@ def generate_tickets(game: str, options: dict | None = None) -> list[dict]:
     pareto_numbers = _validated_pareto_numbers(pareto_details, spec) if options.get("pareto") else None
     latest = storage.latest_draw(spec["key"])
     previous = set(latest.get("numbers", [])) if latest else set()
+    repeat_filter = any(filters.get(key) not in (None, "") for key in ("min_repeated", "max_repeated"))
+    if spec["key"] != "supersete" and repeat_filter and latest is None:
+        raise ValueError("Filtros de repetidas exigem um concurso de referência explícito.")
     generated = []
 
     if spec["key"] == "supersete":
@@ -815,14 +822,14 @@ def _validate_ticket(spec: dict, ticket: dict) -> None:
     if key == "supersete":
         if bonus:
             raise ValueError("Campo especial incompatível com a modalidade.")
-        columns = ticket.get("columns") or [[n] for n in _int_list(ticket.get("numbers", []))]
+        columns = ticket.get("columns") or [[n] for n in _strict_ticket_int_list(ticket.get("numbers", []))]
         if len(columns) != 7:
             raise ValueError("O Super Sete precisa de sete colunas, na ordem do volante.")
         for index, values in enumerate(columns, 1):
-            digits = _int_list(values)
+            digits = _strict_ticket_int_list(values)
             if not digits or len(digits) > 3 or len(set(digits)) != len(digits) or any(n < 0 or n > 9 for n in digits):
                 raise ValueError(f"A coluna {index} precisa ter de 1 a 3 dígitos distintos entre 0 e 9.")
-        column_counts = [len(_int_list(values)) for values in columns]
+        column_counts = [len(_strict_ticket_int_list(values)) for values in columns]
         total_choices = sum(column_counts)
         valid_multiple = (
             total_choices == 7 and all(count == 1 for count in column_counts)
@@ -832,7 +839,7 @@ def _validate_ticket(spec: dict, ticket: dict) -> None:
         if not valid_multiple:
             raise ValueError("A aposta múltipla do Super Sete deve ter 7 opções simples, 8–14 com 1–2 por coluna ou 15–21 com 2–3 por coluna.")
         return
-    numbers = _int_list(ticket.get("numbers", []))
+    numbers = _strict_ticket_int_list(ticket.get("numbers", []))
     if len(set(numbers)) != len(numbers):
         raise ValueError("Um jogo não pode repetir dezenas.")
     valid_lotofacil_simulation = key == "lotofacil" and 15 <= len(numbers) <= 23
@@ -860,6 +867,30 @@ def _validate_ticket(spec: dict, ticket: dict) -> None:
         maximum = bonus_spec.get("maximum", 6)
         if not minimum <= len(trevos) <= maximum or len(set(trevos)) != len(trevos) or any(n < 1 or n > 6 for n in trevos):
             raise ValueError(f"Escolha de {minimum} a {maximum} trevos distintos entre 1 e 6.")
+
+
+def _strict_ticket_int_list(values) -> list[int]:
+    """Parse ticket selections without silently truncating or discarding values."""
+    if values is None:
+        values = []
+    if isinstance(values, str):
+        values = [part.strip() for part in values.replace(";", ",").replace(" ", ",").split(",") if part.strip()]
+    try:
+        values = list(values)
+    except TypeError:
+        raise ValueError("As dezenas do bilhete devem ser valores inteiros válidos.") from None
+    result = []
+    for value in values:
+        if isinstance(value, bool):
+            raise ValueError("As dezenas do bilhete devem ser valores inteiros válidos.")
+        try:
+            number = int(value)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("As dezenas do bilhete devem ser valores inteiros válidos.") from None
+        if isinstance(value, float) and value != number:
+            raise ValueError("As dezenas do bilhete devem ser valores inteiros válidos.")
+        result.append(number)
+    return result
 
 
 def _award(spec: dict, hits: int) -> str | None:

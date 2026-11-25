@@ -306,3 +306,93 @@ test('controles de seleção mantêm aria-pressed sincronizado com estado visual
   vm.runInContext('handleClick(event)',context);
   assert.equal(button['aria-pressed'],'false');
 });
+
+test('Cue documenta Python 3.11+, dependências no checkout e ambiente correspondente sem Bearer', () => {
+  const html=fs.readFileSync(path.join(staticDir,'index.html'),'utf8');
+  assert.match(html,/python3/);
+  assert.match(html,/--transport stdio/);
+  assert.match(html,/Python 3\.11 ou superior/);
+  assert.match(html,/python3 -m pip install -r requirements\.txt/);
+  assert.match(html,/executável Python desse mesmo ambiente/);
+  assert.match(html,/não exige Bearer/);
+  assert.match(html,/&lt;caminho-do-checkout-no-computador-do-Cue&gt;/);
+});
+
+test('menu declara controle e sincroniza estado/label ao abrir, fechar e navegar', () => {
+  const html=fs.readFileSync(path.join(staticDir,'index.html'),'utf8');
+  const source=fs.readFileSync(path.join(staticDir,'app.js'),'utf8');
+  assert.match(html,/id="menu-toggle" aria-controls="sidebar" aria-expanded="false" aria-label="Abrir menu"/);
+  assert.match(source,/aria-expanded','false'/);
+  assert.match(source,/aria-expanded',String\(open\)/);
+  assert.match(source,/open\?'Fechar menu':'Abrir menu'/);
+  assert.match(source,/closeMobileSidebar\(\); render\(\)/);
+});
+
+test('status único permanece exibido e pode quebrar layout até 1080px', () => {
+  const html=fs.readFileSync(path.join(staticDir,'index.html'),'utf8');
+  const css=fs.readFileSync(path.join(staticDir,'app.css'),'utf8');
+  assert.equal((html.match(/role="status"/g)||[]).length>=1,true);
+  assert.doesNotMatch(css,/#sync-status\s*\{\s*display\s*:\s*none/);
+  assert.match(css,/@media\(max-width:1080px\)[\s\S]*?#sync-status\{display:block/);
+  // As três dimensões auditadas são fronteira/interior/fronteira das regras responsivas existentes.
+  assert.match(css,/@media\(max-width:1080px\)/); assert.match(css,/@media\(max-width:760px\)/);
+  for (const width of [390,760,1080]) assert.ok(width<=1080);
+});
+
+test('Super Sete limita seletores a 1–3, respeita composições aceitas e bloqueia inválidas', async () => {
+  async function submit(columnPicks) {
+    const calls=[];
+    const {context,elements}=setup(async (url,options)=>{
+      calls.push({url,payload:JSON.parse(options.body)});
+      return response({items:[],disclaimer:'Somente teste.'});
+    });
+    vm.runInContext("state.catalog=[{key:'supersete',name:'Super Sete',digits:1}];state.game='supersete';state.page='generator';",context);
+    elements['#game-count']={value:'1'};
+    elements['#generated-output']={innerHTML:''};
+    columnPicks.forEach((value,index)=>{elements[`[data-column-pick="${index+1}"]`]={value:String(value)};});
+    await vm.runInContext('handleGenerate({preventDefault(){}})',context);
+    return {calls,output:elements['#generated-output'].innerHTML};
+  }
+  const {context}=setup(async()=>{throw Error('endpoint não deve ser chamado');});
+  const markup=vm.runInContext('superSeteGrid()',context);
+  const optionTags=markup.match(/<option value="\d+"/g)||[];
+  assert.equal(optionTags.length,21);
+  assert.doesNotMatch(markup,/<option value="4"/);
+  const validLayouts=[Array(7).fill(1),Array(7).fill(2),Array(7).fill(3),[2,2,1,1,1,1,1],[3,2,2,2,2,2,2]];
+  for (const picks of validLayouts) {
+    const {calls}=await submit(picks);
+    assert.equal(calls.length,1);
+    assert.equal(calls[0].payload.pick_count,picks[0]);
+    assert.deepEqual(Object.values(calls[0].payload.columns).map(column=>column.pick_count),picks);
+  }
+  for (const picks of [[3,1,1,1,1,1,1],[3,3,1,1,1,1,1],[4,1,1,1,1,1,1]]) {
+    const {calls,output}=await submit(picks);
+    assert.equal(calls.length,0);
+    assert.match(output,/Composição inválida do Super Sete/);
+  }
+});
+
+test('teste de conexão da IA não aplica resposta obsoleta após edição', async () => {
+  let resolveTest, toastMessages=[];
+  const {context,elements,window}=setup();
+  const classes=new Set(['pill-muted']);
+  const status={textContent:'',classList:{remove:value=>classes.delete(value)}};
+  const key={value:'secret'};
+  const button={disabled:false};
+  Object.assign(elements,{'[data-action="ai-test"]':button,'#ai-config-status':status,'#ai-key':key});
+  window.LotoMasterAI={saveFromForm:()=>({model:'m'}),testConnection:()=>new Promise(resolve=>{resolveTest=resolve;})};
+  context.toast=message=>toastMessages.push(message);
+  const pending=vm.runInContext('testPersonalAIConfig()',context);
+  vm.runInContext('aiConfigRevision++',context); // usuário editou enquanto a conexão estava pendente
+  resolveTest({textReceived:true}); await pending;
+  assert.equal(status.textContent,'Testando');
+  assert.equal(key.value,'secret');
+  assert.equal(toastMessages.length,0);
+  assert.equal(button.disabled,false);
+});
+
+test('selo de simulação reconhece provenance client_supplied com draw_origin de fallback', () => {
+  const source=fs.readFileSync(path.join(staticDir,'app.js'),'utf8');
+  assert.match(source,/response\.provenance\?\.kind==='client_supplied'\|\|response\.draw_origin==='client_submitted'/);
+  assert.match(source,/response\.provenance\?\.description\|\|\(clientOrigin/);
+});

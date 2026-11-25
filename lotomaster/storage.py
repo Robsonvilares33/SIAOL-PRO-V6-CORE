@@ -145,8 +145,23 @@ def latest_draw(game: str) -> dict | None:
 
 
 def clear_for_tests() -> None:
-    """Auxiliar de testes: remove apenas o banco indicado por LOTOMASTER_DB_PATH."""
+    """Remove o banco de testes somente quando seu caminho foi configurado explicitamente."""
     global _initialized
+    configured_path = os.getenv("LOTOMASTER_DB_PATH")
+    if not configured_path:
+        raise RuntimeError(
+            "Recusa limpar o banco: configure LOTOMASTER_DB_PATH explicitamente "
+            "para um banco temporário isolado."
+        )
+    configured = Path(configured_path).expanduser().resolve()
+    active = Path(DB_PATH).expanduser().resolve()
+    default = Path(_DEFAULT_DB).expanduser().resolve()
+    if configured != active:
+        raise RuntimeError(
+            "Recusa limpar o banco: LOTOMASTER_DB_PATH não corresponde ao DB_PATH ativo."
+        )
+    if configured == default:
+        raise RuntimeError("Recusa limpar o banco padrão do aplicativo.")
     if DB_PATH.exists():
         DB_PATH.unlink()
     for suffix in ("-wal", "-shm"):

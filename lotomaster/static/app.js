@@ -18,6 +18,7 @@ const months = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','A
 const $ = (selector, root=document) => root.querySelector(selector);
 const $$ = (selector, root=document) => [...root.querySelectorAll(selector)];
 let aiAnalysisController = null;
+let aiConfigRevision = 0;
 let historyNumberSearchController = null;
 let historyNumberSearchVersion = 0;
 
@@ -143,7 +144,7 @@ function pickGrid(item) {
   return `<div class="card"><div class="card-head"><div><h2 class="card-title">Fixar ou remover dezenas</h2><div class="card-subtitle">Toque nas dezenas e use o modo escolhido. Sem seleção, o jogo é aleatório.</div></div><div class="pick-mode"><button type="button" data-mode="fixed" class="${state.mode==='fixed'?'active':''}">● Fixar</button><button type="button" data-mode="excluded" class="${state.mode==='excluded'?'active':''}">× Remover</button></div></div><div class="legend"><span><i class="fixed"></i>Fixa</span><span><i class="removed"></i>Removida</span><span>Disponíveis ${item.range.minimum}–${item.range.maximum}</span></div><div class="number-grid" id="number-grid">${Array.from({length:item.range.maximum-item.range.minimum+1},(_,i)=>i+item.range.minimum).map(n=>`<button type="button" class="number-cell" data-number="${n}" aria-pressed="false">${esc(padNum(n,item.digits))}</button>`).join('')}</div></div>`;
 }
 function superSeteGrid() {
-  return `<div class="card"><div class="card-head"><div><h2 class="card-title">Seleção por coluna</h2><div class="card-subtitle">Marque os dígitos fixos ou excluídos em cada coluna; por padrão é sorteado um dígito por coluna.</div></div><div class="pick-mode"><button type="button" data-mode="fixed" class="${state.mode==='fixed'?'active':''}">● Fixar</button><button type="button" data-mode="excluded" class="${state.mode==='excluded'?'active':''}">× Remover</button></div></div><div class="col-grid">${Array.from({length:7},(_,i)=>`<div class="col-box"><strong>COLUNA ${i+1}</strong><div class="col-digits">${Array.from({length:10},(_,n)=>`<button type="button" data-column="${i+1}" data-digit="${n}" aria-pressed="false">${n}</button>`).join('')}</div><label class="small-note">Opções <select data-column-pick="${i+1}" aria-label="Quantidade de opções na coluna ${i+1}">${Array.from({length:10},(_,j)=>`<option value="${j+1}" ${j===0?'selected':''}>${j+1}</option>`).join('')}</select></label></div>`).join('')}</div></div>`;
+  return `<div class="card"><div class="card-head"><div><h2 class="card-title">Seleção por coluna</h2><div class="card-subtitle">Marque os dígitos fixos ou excluídos em cada coluna; por padrão é sorteado um dígito por coluna.</div></div><div class="pick-mode"><button type="button" data-mode="fixed" class="${state.mode==='fixed'?'active':''}">● Fixar</button><button type="button" data-mode="excluded" class="${state.mode==='excluded'?'active':''}">× Remover</button></div></div><div class="col-grid">${Array.from({length:7},(_,i)=>`<div class="col-box"><strong>COLUNA ${i+1}</strong><div class="col-digits">${Array.from({length:10},(_,n)=>`<button type="button" data-column="${i+1}" data-digit="${n}" aria-pressed="false">${n}</button>`).join('')}</div><label class="small-note">Opções <select data-column-pick="${i+1}" aria-label="Quantidade de opções na coluna ${i+1}">${Array.from({length:3},(_,j)=>`<option value="${j+1}" ${j===0?'selected':''}>${j+1}</option>`).join('')}</select></label></div>`).join('')}</div></div>`;
 }
 function bonusFields(item) {
   if (!item.bonus) return '';
@@ -801,26 +802,30 @@ async function runPersonalAIAnalysis(event) {
 
 function savePersonalAIConfig() {
   try {
+    const revision=++aiConfigRevision;
     const config=window.LotoMasterAI.saveFromForm();
     $('#ai-config-status').textContent=`Configurada · ${config.model}`;
     $('#ai-config-status').classList.remove('pill-muted');
     $('#ai-key').value='';
-    toast(config.persistent?'Configuração guardada neste dispositivo':'Configuração guardada nesta aba');
+    if(revision===aiConfigRevision) toast(config.persistent?'Configuração guardada neste dispositivo':'Configuração guardada nesta aba');
   } catch(error) { toast(error.message); }
 }
 
 async function testPersonalAIConfig() {
   const button=$('[data-action="ai-test"]');
+  const revision=++aiConfigRevision;
   try {
     const config=window.LotoMasterAI.saveFromForm();
     if (button) button.disabled=true;
     const status=$('#ai-config-status'); status.textContent='Testando';
     const result=await window.LotoMasterAI.testConnection(config);
+    if(revision!==aiConfigRevision) return;
     status.textContent=result.textReceived?`Conectada · ${config.model}`:`API respondeu · sem texto`;
     status.classList.remove('pill-muted');
     toast(result.textReceived?'API conectada e retornou texto; nenhum histórico foi enviado':'API alcançada, mas sem texto; análise generativa ainda não confirmada. Nenhum histórico foi enviado.');
     $('#ai-key').value='';
   } catch(error) {
+    if(revision!==aiConfigRevision) return;
     const status=$('#ai-config-status'); if(status) status.textContent='Falha na conexão';
     toast(error.message);
   } finally { if(button) button.disabled=false; }
@@ -1217,6 +1222,13 @@ async function handleGenerate(event) {
   }
   if ($('#pick-count')) payload.pick_count=Number($('#pick-count').value);
   if (item.key==='supersete') {
+    const columnPicks=Array.from({length:7},(_,index)=>Number($(`[data-column-pick="${index+1}"]`)?.value||1));
+    const totalPicks=columnPicks.reduce((sum,value)=>sum+value,0);
+    const validComposition=totalPicks===7&&columnPicks.every(value=>value===1)
+      || totalPicks>=8&&totalPicks<=14&&columnPicks.every(value=>value>=1&&value<=2)
+      || totalPicks>=15&&totalPicks<=21&&columnPicks.every(value=>value>=2&&value<=3);
+    if (columnPicks.some(value=>![1,2,3].includes(value)) || !validComposition) { $('#generated-output').innerHTML=errorBlock('Composição inválida do Super Sete: use 7 opções simples, 8–14 com 1–2 por coluna ou 15–21 com 2–3 por coluna.'); return; }
+    payload.pick_count=columnPicks[0];
     payload.columns={};
     for(let col=1;col<=7;col++) {
       const fixed=$$(`[data-column="${col}"].on-fixed`).map(el=>Number(el.dataset.digit));
@@ -1293,7 +1305,7 @@ async function handleSimulate(event) {
     else request.draw=await api(`/${item.key}/latest`);
     const response=await api(`/${item.key}/simulate`,{method:'POST',body:JSON.stringify(request)});
     if (requestId!==simulationRequestId || version!==renderVersion || state.page!=='simulator' || state.game!==item.key) return;
-    const clientOrigin=response.draw_origin==='client_submitted';
+    const clientOrigin=response.provenance?.kind==='client_supplied'||response.draw_origin==='client_submitted';
     const draw=response.draw||{};
     const provenanceText=response.provenance?.description||(clientOrigin?'Dados enviados pelo navegador; o servidor não verificou sua origem.':'Origem do resultado não verificada independentemente.');
     const drawWarning=draw.warning||response.warning||response.provenance?.warning;
@@ -1306,6 +1318,7 @@ function closeMobileSidebar() {
   if (!sidebar) return;
   const wasOpen=sidebar.classList.contains('open');
   sidebar.classList.remove('open');
+  const toggle=$('#menu-toggle'); if(toggle){toggle.setAttribute('aria-expanded','false');toggle.setAttribute('aria-label','Abrir menu');}
   if (wasOpen&&sidebar.contains(document.activeElement)) $('#menu-toggle')?.focus();
 }
 function toggleMobileSidebar() {
@@ -1313,6 +1326,7 @@ function toggleMobileSidebar() {
   if (!sidebar) return;
   if (sidebar.classList.contains('open')) closeMobileSidebar();
   else sidebar.classList.add('open');
+  const open=sidebar.classList.contains('open'), toggle=$('#menu-toggle'); if(toggle){toggle.setAttribute('aria-expanded',String(open));toggle.setAttribute('aria-label',open?'Fechar menu':'Abrir menu');}
 }
 function handleClick(event) {
   const pageButton=event.target.closest('[data-page]');
@@ -1322,7 +1336,7 @@ function handleClick(event) {
   const columnButton=event.target.closest('[data-column][data-digit]');
   const aiButton=event.target.closest('[data-action]');
   if (aiButton?.dataset.action==='ai-test') { testPersonalAIConfig(); return; }
-  if (aiButton?.dataset.action==='ai-clear') { window.LotoMasterAI.clearConfig(); toast('Chave removida deste navegador'); render(); return; }
+  if (aiButton?.dataset.action==='ai-clear') { aiConfigRevision++; window.LotoMasterAI.clearConfig(); toast('Chave removida deste navegador'); render(); return; }
   if (aiButton?.dataset.action==='ai-use-candidate') {
     try {
       const item=spec(); const numbers=JSON.parse(aiButton.dataset.numbers);
@@ -1388,6 +1402,7 @@ function handleClick(event) {
   }
 }
 function handleChange(event) {
+  if (event.target.matches?.('#ai-provider,#ai-model,#ai-endpoint,#ai-key,#ai-remember')) aiConfigRevision++;
   if (event.target.id==='history-sort') renderHistorySimulation();
   if (event.target.id==='closure-view') changeClosureView('closure',event.target.value);
   if (event.target.id==='repeated-view') changeClosureView('repeated',event.target.value);
@@ -1410,11 +1425,12 @@ async function init() {
   try {
     const data=await api('/lotteries'); state.catalog=data.items;
     renderGameNav();
-    $('#game-picker').addEventListener('change',e=>{if(state.page==='tools'&&state.game==='lotofacil')invalidateHistoryNumberSearch('Pesquisa cancelada ao trocar de modalidade.');state.game=e.target.value;state.page='overview';state.generated=[];state.simulatorTickets=[];state.simulatorText='';state.simulatorBonus={};render();});
+    $('#game-picker').addEventListener('change',e=>{if(state.page==='tools'&&state.game==='lotofacil')invalidateHistoryNumberSearch('Pesquisa cancelada ao trocar de modalidade.');state.game=e.target.value;state.page='overview';state.generated=[];state.simulatorTickets=[];state.simulatorText='';state.simulatorBonus={};closeMobileSidebar();render();});
     $('#refresh-button').addEventListener('click',()=>refreshLiveData(true));
     $('#menu-toggle').addEventListener('click',toggleMobileSidebar);
     $('#main-content').addEventListener('click',handleClick);
     $('#main-content').addEventListener('change',handleChange);
+    $('#main-content').addEventListener('input',event=>{if(event.target.matches?.('#ai-provider,#ai-model,#ai-endpoint,#ai-key,#ai-remember'))aiConfigRevision++;});
     $('#main-content').addEventListener('submit',handleSubmit);
     $('#game-nav').addEventListener('click',event=>{const target=event.target.closest('[data-game]');if(target){if(state.page==='tools'&&state.game==='lotofacil')invalidateHistoryNumberSearch('Pesquisa cancelada ao trocar de modalidade.');state.game=target.dataset.game;state.page='overview';state.generated=[];state.simulatorTickets=[];state.simulatorText='';state.simulatorBonus={};closeMobileSidebar();render();}});
     $$('.section-nav [data-page]').forEach(button=>button.addEventListener('click',()=>{if(state.page==='tools'&&state.game==='lotofacil')invalidateHistoryNumberSearch('Pesquisa cancelada ao sair da tela.');state.page=button.dataset.page;closeMobileSidebar();render();}));

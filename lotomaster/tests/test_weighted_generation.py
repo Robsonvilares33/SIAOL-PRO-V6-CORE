@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from lotomaster.engine import generate_tickets
+from lotomaster.engine import generate_tickets, simulate_tickets
 
 
 class WeightedGenerationTests(unittest.TestCase):
@@ -60,6 +60,23 @@ class WeightedGenerationTests(unittest.TestCase):
             empty = generate_tickets("megasena", {"seed": 41, "weights": {}})[0]["numbers"]
             weighted_sample.assert_not_called()
         self.assertEqual(legacy, empty)
+
+    def test_repeat_filters_require_explicit_reference_for_generation(self):
+        with patch("lotomaster.engine.storage.latest_draw", return_value=None):
+            with self.assertRaisesRegex(ValueError, "concurso de referência explícito"):
+                generate_tickets("megasena", {"filters": {"min_repeated": 0}})
+            with self.assertRaisesRegex(ValueError, "concurso de referência explícito"):
+                generate_tickets("megasena", {"filters": {"max_repeated": 6}})
+            self.assertEqual(len(generate_tickets("megasena", {"filters": {}, "seed": 2})), 1)
+            self.assertEqual(len(generate_tickets("supersete", {"filters": {}, "seed": 2})), 1)
+
+    def test_simulation_ticket_parsing_rejects_fractional_and_unparseable_items(self):
+        draw = {"contest": 99, "numbers": [1, 2, 3, 4, 5, 6]}
+        for selected in ([1, 2, 3, 4, 5, 6.7], [1, 2, 3, 4, 5, "bad"]):
+            with self.subTest(selected=selected), self.assertRaisesRegex(ValueError, "valores inteiros"):
+                simulate_tickets("megasena", [{"numbers": selected}], draw)
+        result = simulate_tickets("megasena", [{"numbers": "1, 2, 3, 4, 5, 6"}], draw)
+        self.assertEqual(result[0]["hits"], 6)
 
     def test_weights_are_transient_and_do_not_persist(self):
         with patch("lotomaster.engine.storage.latest_draw", return_value=None), \

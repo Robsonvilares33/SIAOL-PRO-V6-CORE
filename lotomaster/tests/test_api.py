@@ -67,7 +67,8 @@ class LotomasterApiTests(unittest.TestCase):
         self.assertEqual(draw["contest"], 3801)
 
     def test_generate_and_simulate(self):
-        generated = self.client.post("/api/v1/lotofacil/generate", json={"count": 2, "seed": 20})
+        with patch("lotomaster.api.storage.latest_draw", return_value=None):
+            generated = self.client.post("/api/v1/lotofacil/generate", json={"count": 2, "seed": 20})
         self.assertEqual(generated.status_code, 200)
         self.assertEqual(generated.json()["count"], 2)
         draw = {"game": "megasena", "contest": 1, "draw_date": "01/01/2026", "numbers": [1, 2, 3, 4, 5, 6], "second_numbers": [], "trevos": [], "month": None, "team": None}

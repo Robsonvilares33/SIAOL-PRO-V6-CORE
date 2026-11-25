@@ -199,6 +199,21 @@ class MCPHTTPTests(unittest.TestCase):
         self.assertFalse(result["isError"])
         self.assertEqual(result["structuredContent"]["probability"]["one_in"], 50063860)
 
+    def test_nonfinite_tool_result_is_error_with_id_and_no_structured_content(self):
+        status, _, body = self.post({
+            "jsonrpc": "2.0", "id": "strict-json", "method": "tools/call",
+            "params": {"name": "analyze_games", "arguments": {
+                "game": "lotofacil", "tickets": [{"numbers": list(range(1, 16))}],
+                "draws": [{"contest": 1, "numbers": list(range(1, 16)), "draw_date": float("inf")}],
+            }},
+        })
+        self.assertEqual(status, 200)
+        response = json.loads(body)
+        self.assertEqual(response["id"], "strict-json")
+        self.assertTrue(response["result"]["isError"])
+        self.assertNotIn("structuredContent", response["result"])
+        self.assertNotIn(b"Infinity", body)
+
     def test_unexpected_origin_and_token_configuration_fail_closed(self):
         with patch.dict(os.environ, {"LOTOMASTER_MCP_BEARER_TOKEN": "short"}):
             status, _, body = self.post({"jsonrpc": "2.0", "id": 1, "method": "ping"}, token="short")
@@ -284,6 +299,7 @@ class MCPReadOnlyTests(unittest.TestCase):
                 patch.object(mcp_server, "_working_tree_fingerprint", return_value="stable"),
                 patch.object(mcp_server, "_project_file_index", return_value=[{"path": "lotomaster/valid.py"}]),
                 patch.object(mcp_server, "_run_fixed_check", side_effect=pass_unrelated_check),
+                patch.object(mcp_server.shutil, "which", return_value="/controlled/node"),
             ):
                 result = mcp_server._run_branch_checks("stdio")
             syntax = next(check for check in result["checks"] if check["check"] == "python_syntax")
@@ -392,6 +408,20 @@ class MCPReadOnlyTests(unittest.TestCase):
                     mcp_server._tool_result("read_project_file", {"path": "secrets/config.py"})
                 with self.assertRaisesRegex(ValueError, "permanecer dentro"):
                     mcp_server._tool_result("read_project_file", {"path": "../outside.txt"})
+
+    def test_project_file_prefix_filter_precedes_global_inventory_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index in range(mcp_server.MAX_PROJECT_FILES + 20):
+                (root / f"global_{index:04}.py").write_text("x=1\n", encoding="utf-8")
+            (root / "wanted").mkdir()
+            (root / "wanted" / "match.py").write_text("x=2\n", encoding="utf-8")
+            with patch.object(mcp_server, "REPO_ROOT", root):
+                prefixed = mcp_server._tool_result("list_project_files", {"path_prefix": "wanted"})
+                global_listing = mcp_server._tool_result("list_project_files", {"limit": 500})
+        self.assertEqual([item["path"] for item in prefixed["items"]], ["wanted/match.py"])
+        self.assertEqual(prefixed["count"], 1)
+        self.assertEqual(global_listing["count"], mcp_server.MAX_PROJECT_FILES)
 
     def test_read_project_file_rejects_symlinked_parent_and_hard_links(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -878,6 +908,28 @@ class MCPBranchEditTests(unittest.TestCase):
         self.assertIn("tipo não permitido", result.stdout)
         self.assertTrue(target.exists())
 
+    def test_review_preserves_carriage_return_git_path_exactly(self):
+        temporary, root, target = self._repo()
+        self.addCleanup(temporary.cleanup)
+        cr_path = root / "lotomaster" / "carriage\rreturn.py"
+        cr_path.write_text("before\n", encoding="utf-8")
+        self._git(root, "add", "lotomaster/carriage\rreturn.py")
+        self._git(root, "commit", "-q", "-m", "add CR path")
+        cr_path.write_text("after\n", encoding="utf-8")
+        with (
+            patch.object(mcp_server, "REPO_ROOT", root),
+            patch.object(mcp_server, "_assert_branch_edit_access", return_value=mcp_server.EDITABLE_BRANCH),
+        ):
+            result = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
+            changed, _excluded, _omitted, statuses = mcp_server._safe_changed_paths()
+        expected = "lotomaster/carriage\rreturn.py"
+        self.assertIn(expected, result["changed_files"])
+        self.assertIn(expected, changed)
+        self.assertEqual(statuses[expected], " M")
+        self.assertIn("a/lotomaster/carriage\\rreturn.py", result["diff"])
+        self.assertIn("b/lotomaster/carriage\\rreturn.py", result["diff"])
+        self.assertTrue(result["diff_complete"])
+
     def test_review_preserves_listed_path_with_newline_in_git_status(self):
         temporary, root, _ = self._repo()
         self.addCleanup(temporary.cleanup)
@@ -1152,7 +1204,7 @@ class MCPBranchEditTests(unittest.TestCase):
         target.write_text("staged version\n", encoding="utf-8")
         self._git(root, "add", "lotomaster/script.py")
         target.write_text("working-tree version\n", encoding="utf-8")
-        original_git_output = mcp_server._git_output
+        original_git_output = mcp_server._git_output_bytes
         path_queries = []
 
         def record_path_query(arguments, *, timeout=10):
@@ -1162,7 +1214,7 @@ class MCPBranchEditTests(unittest.TestCase):
 
         with (
             patch.object(mcp_server, "REPO_ROOT", root),
-            patch.object(mcp_server, "_git_output", side_effect=record_path_query),
+            patch.object(mcp_server, "_git_output_bytes", side_effect=record_path_query),
             patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"}),
         ):
             review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
@@ -1181,7 +1233,7 @@ class MCPBranchEditTests(unittest.TestCase):
         self._git(root, "add", "lotomaster/stable.py")
         self._git(root, "commit", "-q", "-m", "add stable review file")
         target.write_text("initial dirty version\n", encoding="utf-8")
-        original_git_output = mcp_server._git_output
+        original_git_output = mcp_server._git_output_bytes
         status_queries = 0
 
         def change_after_initial_status(arguments, *, timeout=10):
@@ -1195,7 +1247,7 @@ class MCPBranchEditTests(unittest.TestCase):
 
         with (
             patch.object(mcp_server, "REPO_ROOT", root),
-            patch.object(mcp_server, "_git_output", side_effect=change_after_initial_status),
+            patch.object(mcp_server, "_git_output_bytes", side_effect=change_after_initial_status),
             patch.dict(os.environ, {"LOTOMASTER_MCP_ENABLE_BRANCH_EDIT": "1"}),
         ):
             review = mcp_server._tool_result("review_branch_diff", {}, transport="stdio")
@@ -1922,6 +1974,22 @@ class MCPBranchEditTests(unittest.TestCase):
                     "path": "lotomaster/script.py", "expected_sha256": hashlib.sha256(target.read_bytes()).hexdigest(), "content": "bad\n",
                 }, transport="stdio")
         self.assertEqual(target.read_text(encoding="utf-8"), "before\n")
+
+    def test_fixed_check_redirects_stdin_to_devnull(self):
+        real_popen = subprocess.Popen
+        seen = {}
+        def capture_popen(*args, **kwargs):
+            seen.update(kwargs)
+            return real_popen(*args, **kwargs)
+        result = None
+        with patch.object(mcp_server.subprocess, "Popen", side_effect=capture_popen):
+            result = mcp_server._run_fixed_check(
+                "stdin-check", [sys.executable, "-c", "pass"], os.environ.copy(), 5,
+            )
+        self.assertTrue(result["passed"])
+        self.assertIs(seen["stdin"], subprocess.DEVNULL)
+        self.assertIs(seen["stdout"], subprocess.PIPE)
+        self.assertIs(seen["stderr"], subprocess.PIPE)
 
     def test_check_runner_uses_fixed_commands_and_sanitized_temporary_environment(self):
         calls = []

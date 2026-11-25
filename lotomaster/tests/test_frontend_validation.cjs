@@ -450,11 +450,15 @@ test('fechar a sidebar móvel devolve o foco ao botão somente quando necessári
   const focusedLink={};
   const outside={};
   const sidebar={classList:{contains:name=>name==='open'&&open,remove:name=>{if(name==='open')open=false;}},contains:element=>element===focusedLink};
-  const {context}=frontend({'#sidebar':sidebar,'#menu-toggle':{focus(){focusCalls++;}}});
+  const toggle={focus(){focusCalls++;},setAttribute(name,value){this[name]=value;}};
+  const {context,elements}=frontend({'#sidebar':sidebar,'#menu-toggle':toggle});
+  const menuButton=elements['#menu-toggle'];
   context.document.activeElement=focusedLink;
   vm.runInContext('closeMobileSidebar()',context);
   assert.equal(open,false);
   assert.equal(focusCalls,1);
+  assert.equal(menuButton['aria-expanded'],'false');
+  assert.equal(menuButton['aria-label'],'Abrir menu');
   open=true;
   context.document.activeElement=outside;
   vm.runInContext('closeMobileSidebar()',context);

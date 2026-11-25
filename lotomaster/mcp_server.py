@@ -490,7 +490,7 @@ def _is_safe_project_file(path: Path) -> bool:
         return False
 
 
-def _project_file_index() -> list[dict[str, Any]]:
+def _project_file_index(path_prefix: str = "") -> list[dict[str, Any]]:
     root = REPO_ROOT.resolve()
     if not root.is_dir():
         raise ValueError("Checkout do repositório indisponível.")
@@ -505,10 +505,12 @@ def _project_file_index() -> list[dict[str, Any]]:
             path = Path(current) / filename
             if not _is_safe_project_file(path):
                 continue
-            result.append({
-                "path": path.relative_to(root).as_posix(),
-                "size_bytes": path.stat().st_size,
-            })
+            relative_path = path.relative_to(root).as_posix()
+            if path_prefix and not (
+                relative_path.startswith(path_prefix + "/") or relative_path == path_prefix
+            ):
+                continue
+            result.append({"path": relative_path, "size_bytes": path.stat().st_size})
             if len(result) > MAX_PROJECT_FILES:
                 return sorted(result, key=lambda item: item["path"])[:MAX_PROJECT_FILES]
     return sorted(result, key=lambda item: item["path"])
@@ -523,9 +525,7 @@ def _list_project_files(arguments: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("path_prefix precisa ser relativo e não pode subir diretórios.")
     offset = _require_int(arguments.get("offset", 0), "offset", 0, 2**31 - 1)
     limit = _require_int(arguments.get("limit", 200), "limit", 1, 500)
-    files = _project_file_index()
-    if normalized_prefix:
-        files = [item for item in files if item["path"].startswith(normalized_prefix + "/") or item["path"] == normalized_prefix]
+    files = _project_file_index(normalized_prefix)
     return {
         "items": files[offset:offset + limit],
         "count": len(files),
@@ -769,6 +769,22 @@ def _safe_git_environment() -> dict[str, str]:
         "GIT_OPTIONAL_LOCKS": "0",
         "GIT_TERMINAL_PROMPT": "0",
     }
+
+
+def _git_output_bytes(arguments: list[str], *, timeout: int = 10) -> bytes:
+    """Capture Git output verbatim for commands whose records are NUL-delimited."""
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(REPO_ROOT.resolve()), *arguments],
+            cwd=REPO_ROOT.resolve(), env=_safe_git_environment(),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=timeout, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise ValueError("Git indisponível; a operação foi bloqueada.") from None
+    if completed.returncode != 0:
+        raise ValueError("Não foi possível verificar o estado local do repositório.")
+    return completed.stdout
 
 
 def _git_output(arguments: list[str], *, timeout: int = 10) -> str:
@@ -1188,10 +1204,10 @@ def _tracked_preimage_snapshot(
     path: str, revision: str, *, strict: bool = False,
 ) -> tuple[str, bytes] | None:
     try:
-        entries = _git_output([
+        entries = _git_output_bytes([
             "ls-tree", "-z", "--full-tree", revision, "--", f":(literal){path}",
-        ]).split("\0")
-        entry = next((item for item in entries if "\t" in item and item.split("\t", 1)[1] == path), "")
+        ]).split(b"\0")
+        entry = next((os.fsdecode(item) for item in entries if b"\t" in item and os.fsdecode(item).split("\t", 1)[1] == path), "")
         if not entry:
             return None
         metadata, stored_path = entry.split("\t", 1)
@@ -1214,8 +1230,8 @@ def _tracked_preimage_snapshot(
 
 def _indexed_preimage_snapshot(path: str, *, strict: bool = False) -> tuple[str, bytes] | None:
     try:
-        entries = _git_output(["ls-files", "--stage", "-z", "--", f":(literal){path}"]).split("\0")
-        matches = [item for item in entries if "\t" in item and item.split("\t", 1)[1] == path]
+        entries = _git_output_bytes(["ls-files", "--stage", "-z", "--", f":(literal){path}"]).split(b"\0")
+        matches = [os.fsdecode(item) for item in entries if b"\t" in item and os.fsdecode(item).split("\t", 1)[1] == path]
         if not matches:
             return None
         if len(matches) != 1:
@@ -1491,13 +1507,14 @@ def _capture_diff_source_versions(paths: list[str]) -> tuple[str, dict[str, Any]
 def _review_candidate_paths() -> tuple[list[str], int]:
     candidates = set()
     tracked_outputs = (
-        _git_output(["ls-tree", "-rz", "--full-tree", "HEAD", "--", "lotomaster"]),
-        _git_output(["ls-files", "--stage", "-z", "--", "lotomaster"]),
+        _git_output_bytes(["ls-tree", "-rz", "--full-tree", "HEAD", "--", "lotomaster"]),
+        _git_output_bytes(["ls-files", "--stage", "-z", "--", "lotomaster"]),
     )
     for output in tracked_outputs:
-        for entry in output.split("\0"):
-            if "\t" not in entry:
+        for raw_entry in output.split(b"\0"):
+            if b"\t" not in raw_entry:
                 continue
+            entry = os.fsdecode(raw_entry)
             path = entry.split("\t", 1)[1]
             if path and _is_editable_branch_path(path):
                 candidates.add(path)
@@ -1538,10 +1555,10 @@ def _safe_changed_paths() -> tuple[list[str], list[str], int, dict[str, str]]:
 
     if eligible:
         literal_paths = [f":(literal){path}" for path in eligible]
-        changed = _git_output([
+        changed = [os.fsdecode(item) for item in _git_output_bytes([
             "status", "--porcelain=v1", "-z", "--untracked-files=no", "--no-renames",
             "--", *literal_paths,
-        ]).split("\0")
+        ]).split(b"\0")]
     else:
         changed = []
     allowed = set(eligible)
@@ -1861,9 +1878,9 @@ def _review_branch_diff(transport: str) -> dict[str, Any]:
     if diff_withheld:
         diff = ""
     safe = {item["path"] for item in _project_file_index()}
-    untracked = _git_output([
+    untracked = [os.fsdecode(item) for item in _git_output_bytes([
         "ls-files", "--others", "--exclude-standard", "-z", "--", "lotomaster",
-    ]).split("\0")
+    ]).split(b"\0")]
     safe_untracked = sorted({path for path in untracked if path and path in safe and _is_editable_branch_path(path)})
     encoded = diff.encode("utf-8")
     complete = (
@@ -1947,7 +1964,9 @@ def _safe_untracked_file_digest(
 
 
 def _safe_untracked_project_files() -> list[str]:
-    untracked = _git_output(["ls-files", "--others", "--exclude-standard", "-z"]).split("\0")
+    untracked = [os.fsdecode(item) for item in _git_output_bytes(
+        ["ls-files", "--others", "--exclude-standard", "-z"]
+    ).split(b"\0")]
     safe_paths = []
     root = REPO_ROOT.resolve()
     for path in sorted({item for item in untracked if item}):
@@ -2003,7 +2022,8 @@ def _working_tree_fingerprint() -> str:
 def _run_fixed_check(label: str, command: list[str], env: dict[str, str], timeout: int) -> dict[str, Any]:
     try:
         process = subprocess.Popen(
-            command, cwd=REPO_ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            command, cwd=REPO_ROOT, env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             bufsize=0, start_new_session=(os.name == "posix"),
         )
     except OSError:
@@ -2313,7 +2333,7 @@ def _dispatch(message: Any, *, transport: str = "unknown") -> dict[str, Any] | N
                     _tool_result(name, arguments, transport=transport),
                     preserve_digest_fields=name in {"read_project_file", "edit_branch_file"},
                 )
-                text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+                text = json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
                 result = {"content": [{"type": "text", "text": text}], "structuredContent": value, "isError": False}
             except RecursionError:
                 return _jsonrpc_error(request_id, -32603, "Internal error")
