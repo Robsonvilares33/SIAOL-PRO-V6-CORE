@@ -70,7 +70,7 @@ def latest_result(game: str, refresh: bool = True) -> dict:
             if (
                 concurrent_mem is not None
                 and concurrent_mem[1].get("_latest_checked_at")
-                and (stale is None or int(concurrent_mem[1]["contest"]) > int(stale["contest"]))
+                and (stale is None or int(concurrent_mem[1]["contest"]) >= int(stale["contest"]))
             ):
                 return {
                     **concurrent_mem[1],

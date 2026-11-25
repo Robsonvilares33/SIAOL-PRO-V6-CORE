@@ -332,7 +332,11 @@ def _redact_private_key_blocks(text: str) -> str:
     for start, block_end in _private_key_block_spans(text):
         output.append(text[cursor:start])
         line_terminators = re.findall(r"\r\n|\r|\n", text[start:block_end])
-        redacted_block = replacement + "".join(line_terminators)
+        redacted_block = replacement
+        for terminator in line_terminators:
+            if redacted_block.endswith("\r") and terminator == "\n":
+                redacted_block += replacement
+            redacted_block += terminator
         if not text[block_end:] and line_terminators:
             redacted_block += replacement
         output.append(redacted_block)

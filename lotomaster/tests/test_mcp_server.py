@@ -398,6 +398,29 @@ class MCPReadOnlyTests(unittest.TestCase):
                 if suffix:
                     self.assertIn(f"4: {suffix}", second["content"])
 
+    def test_private_key_redaction_preserves_separate_cr_and_lf_line_numbers(self):
+        marker = "fixture-payload-a17c"
+        source = (
+            "-----BEGIN PRIVATE KEY-----\r"
+            f"{marker}\n"
+            "-----END PRIVATE KEY-----\n"
+            "after\n"
+        )
+        self.assertEqual(len(source.splitlines()), 4)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "keys.py").write_bytes(source.encode("utf-8"))
+            with patch.object(mcp_server, "REPO_ROOT", root):
+                result = mcp_server._tool_result(
+                    "read_project_file",
+                    {"path": "keys.py", "start_line": 1, "max_lines": 10},
+                )
+
+        self.assertEqual((result["total_lines"], result["start_line"], result["end_line"]), (4, 1, 4))
+        self.assertNotIn(marker, result["content"])
+        self.assertIn("4: after", result["content"])
+
     def test_analyze_games_is_bounded_and_non_persistent(self):
         with tempfile.TemporaryDirectory() as directory:
             missing = Path(directory) / "must-not-exist.sqlite3"

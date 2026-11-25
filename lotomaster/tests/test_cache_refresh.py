@@ -149,6 +149,26 @@ class LatestResultCacheTests(unittest.TestCase):
         self.assertIn("warning", result)
         self.assertIs(engine._latest_cache["megasena"], cache_entry)
 
+    def test_failed_refresh_keeps_checked_memory_when_sqlite_has_same_contest(self):
+        newest = {"contest": 101, "numbers": [4, 5, 6]}
+        older = {"contest": 100, "numbers": [1, 2, 3]}
+
+        with (
+            patch("lotomaster.engine.fetch_draw", side_effect=[newest, OSError("rede indisponível"), older]),
+            patch("lotomaster.engine.storage.save_draw"),
+            patch("lotomaster.engine.storage.latest_draw", return_value=newest),
+        ):
+            first = engine.latest_result("megasena", refresh=True)
+            fallback = engine.latest_result("megasena", refresh=True)
+            after_older_fetch = engine.latest_result("megasena", refresh=True)
+
+        self.assertEqual(first["contest"], 101)
+        self.assertEqual(fallback["contest"], 101)
+        self.assertEqual(fallback["source"], "cache")
+        self.assertIn("warning", fallback)
+        self.assertEqual(after_older_fetch["contest"], 101)
+        self.assertEqual(engine._latest_cache["megasena"][1]["contest"], 101)
+
     def test_failed_refresh_cannot_overwrite_a_concurrent_success(self):
         cached_db = {"contest": 100, "numbers": [1, 2, 3]}
         fresh = {"contest": 101, "numbers": [4, 5, 6]}
