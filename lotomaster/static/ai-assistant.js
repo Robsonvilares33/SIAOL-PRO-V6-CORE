@@ -136,7 +136,8 @@
       body = {model: config.model, instructions: system, input: prompt, max_output_tokens: testOnly ? 40 : 1800, store: false};
     } else if (config.provider === 'openai-chat') {
       headers.Authorization = `Bearer ${config.key}`;
-      body = {model: config.model, messages:[{role:'system',content:system},{role:'user',content:prompt}], max_tokens:testOnly?40:1800, temperature:0.2};
+      body = {model: config.model, messages:[{role:'system',content:system},{role:'user',content:prompt}], max_tokens:testOnly?40:1800};
+      if (config.model !== 'gpt-6-astra') body.temperature = 0.2;
     } else if (config.provider === 'gemini') {
       endpoint = endpoint.replaceAll('{model}', encodeURIComponent(config.model));
       headers['x-goog-api-key'] = config.key;

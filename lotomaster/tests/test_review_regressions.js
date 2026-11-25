@@ -33,7 +33,31 @@ test('fallback com oito valores separados e conferidos no ASGI real',async()=>{
 });
 
 test('fallback rejeita números malformados em vez de convertê-los silenciosamente',async()=>{
-  await assert.rejects(fallback({numero:407,listaDezenas:['1x','22','25','26','28','50'],trevosSorteados:['2','3']}),/Dezena inválida/);
+ await assert.rejects(fallback({numero:407,listaDezenas:['1x','22','25','26','28','50'],trevosSorteados:['2','3']}),/Dezena inválida/);
+});
+
+async function batchTickets(input) {
+ const fields={'#batch-from':{value:'1'},'#batch-to':{value:'1'},'#batch-numbers':{value:input},'#batch-status':{textContent:''},'#batch-result':{innerHTML:''},'#batch-bonus-override':{checked:false}};
+ const submitter={disabled:false,isConnected:true};
+ const document={querySelector:s=>s==='#batch-submit'?submitter:fields[s]||null,querySelectorAll:()=>[]};
+ const ctx=vm.createContext({window:{addEventListener(){}},document,console,setTimeout,clearTimeout,AbortController,URLSearchParams});
+ vm.runInContext(fs.readFileSync(path.join(dir,'app.js'),'utf8'),ctx);
+ vm.runInContext("state.catalog=[{key:'supersete',name:'Super Sete',digits:1,pick_size:7,min_pick:7,max_pick:7,draw_size:7,range:{minimum:0,maximum:9}}];state.game='supersete';state.page='simulator';state.simulatorText='1 2 3 4 5 6 7';state.simulatorTickets=[{numbers:[1,2,3,4,5,6,7],columns:[[1,8],[2],[3],[4],[5],[6],[7]],bonus:{},ticket_number:1}]",ctx);
+ ctx.loadHistoryRange=async()=>[];
+ ctx.simulateHistoryInChunks=async(_game,tickets)=>{ctx.capturedTickets=JSON.parse(JSON.stringify(tickets));return {results:[]};};
+ ctx.renderHistorySimulation=()=>{};
+ await vm.runInContext('handleHistoryBatch({preventDefault(){},submitter:document.querySelector("#batch-submit")})',ctx);
+ return ctx.capturedTickets;
+}
+
+test('checker em lote preserva detalhes Super Sete só quando os números parseados não mudam',async()=>{
+ const formatted=await batchTickets('1   2 3 4 5 6 7');
+ assert.deepEqual(Array.from(formatted[0].columns[0]),[1,8]);
+ const changedDigit=await batchTickets('8 2 3 4 5 6 7');
+ assert.deepEqual(Array.from(changedDigit[0].columns[0]),[8]);
+ const changedOrder=await batchTickets('2 1 3 4 5 6 7');
+ assert.deepEqual(Array.from(changedOrder[0].columns[0]),[2]);
+ assert.deepEqual(Array.from(changedOrder[0].columns[1]),[1]);
 });
 
 test('jogos gerados preservam trevos individuais, edição aplica a todos e limpar é rejeitado',async()=>{

@@ -358,6 +358,14 @@ def _scan_quoted_value(text: str, start: int) -> tuple[int, str, bool]:
             cursor += 1
     return len(text), delimiter, True
 
+def _quoted_string_start(text: str, start: int) -> int | None:
+    if start >= len(text):
+        return None
+    if text[start] in "\"'":
+        return start
+    prefix = re.match(r"(?:[rubf]|br|rb|fr|rf)(?=[\"'])", text[start:], re.IGNORECASE)
+    return start + len(prefix.group(0)) if prefix else None
+
 
 def _redact_sensitive_key_values(text: str) -> str:
     output = []
@@ -378,18 +386,20 @@ def _redact_sensitive_key_values(text: str) -> str:
         if value_start >= len(text):
             continue
 
-        quote = text[value_start] if text[value_start] in "\"'" else None
+        quote_start = _quoted_string_start(text, value_start)
+        quote = text[quote_start] if quote_start is not None else None
         malformed_quote = False
         delimiter = quote
         if quote:
-            value_end, delimiter, malformed_quote = _scan_quoted_value(text, value_start)
+            value_end, delimiter, malformed_quote = _scan_quoted_value(text, quote_start)
             while not malformed_quote:
                 next_start = value_end
                 while next_start < len(text) and text[next_start].isspace():
                     next_start += 1
-                if next_start >= len(text) or text[next_start] not in "\"'":
+                next_quote_start = _quoted_string_start(text, next_start)
+                if next_quote_start is None:
                     break
-                value_end, _next_delimiter, malformed_quote = _scan_quoted_value(text, next_start)
+                value_end, _next_delimiter, malformed_quote = _scan_quoted_value(text, next_quote_start)
         else:
             value_end = value_start
 
@@ -398,7 +408,7 @@ def _redact_sensitive_key_values(text: str) -> str:
                 value_end += 1
         if value_end == value_start:
             continue
-        output.append(text[cursor:value_start])
+        output.append(text[cursor:quote_start if quote else value_start])
         if quote:
             output.append(f"{delimiter}[REDACTED]" + ("" if malformed_quote else delimiter))
             line_breaks = re.findall(r"\r\n|\r|\n|\v|\f|\x1c|\x1d|\x1e|\x85|\u2028|\u2029", text[value_start:value_end])

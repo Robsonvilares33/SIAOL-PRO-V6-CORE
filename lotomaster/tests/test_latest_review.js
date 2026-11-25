@@ -38,6 +38,21 @@ test('geração do assistente pede time, valida e envia à API real',async()=>{
  elements['#assistant-team'].value='  Teste FC  ';await vm.runInContext('generateAssistantTicket()',ctx);assert.equal(ctx.requests[0].bonus.team,'Teste FC');assert.match(elements['#assistant-ticket'].innerHTML,/Teste FC/);
  elements['#assistant-team'].value='x'.repeat(101);await vm.runInContext('generateAssistantTicket()',ctx);assert.equal(ctx.requests.length,1);
 });
+test('bilhete do assistente mostra Mês da Sorte e trevos retornados pelo gerador',async()=>{
+ const {ctx,elements}=setupApp();
+ let bonus={};
+ ctx.api=async()=>({items:[{numbers:[1,2,3,4,5,6,7],bonus,probability:{one_in:100,event:'evento'}}],disclaimer:'aviso'});
+ const cases=[
+  {game:'diadesorte',name:'Dia de Sorte',digits:2,pick_size:7,range:{minimum:1,maximum:31},bonus:{type:'month'},ticketBonus:{month:4},check:/Mês da Sorte: Abril/},
+  {game:'maismilionaria',name:'+Milionária',digits:2,pick_size:6,range:{minimum:1,maximum:50},bonus:{type:'trevos'},ticketBonus:{trevos:[2,5]},check:/Trevos:[\s\S]*02[\s\S]*05/},
+ ];
+ for(const item of cases){
+  bonus=item.ticketBonus;
+  vm.runInContext(`state.catalog=[${JSON.stringify({key:item.game,name:item.name,digits:item.digits,pick_size:item.pick_size,range:item.range,bonus:item.bonus})}];state.game=${JSON.stringify(item.game)};state.page='assistant'`,ctx);
+  await vm.runInContext('generateAssistantTicket()',ctx);
+  assert.match(elements['#assistant-ticket'].innerHTML,item.check,item.game);
+ }
+});
 test('histórico sem prova de consulta recente nunca se declara completo e avisa',async()=>{
  for (const provenance of [undefined,{recently_checked:false,latest_lookup:'server_cache'}]) {
   const {ctx}=setupApp();ctx.page={items:[{contest:1}],from_contest:1,to_contest:1,expected_count:1,missing_contests:[],next_before:null,provenance};ctx.progress={textContent:''};vm.runInContext('api=async()=>page',ctx);

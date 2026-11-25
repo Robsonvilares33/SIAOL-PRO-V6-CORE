@@ -452,6 +452,24 @@ class MCPReadOnlyTests(unittest.TestCase):
         self.assertIn('description = "ordinary text"', content)
         self.assertIn("[REDACTED]", content)
 
+    def test_read_project_file_redacts_python_string_prefixes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = (
+                'api_key = r"raw credential with spaces"\n'
+                'password = R"""multiline raw credential\ncontinued private text"""\n'
+                'description = "ordinary text"\n'
+            )
+            (root / "app.py").write_text(source, encoding="utf-8")
+            with patch.object(mcp_server, "REPO_ROOT", root):
+                result = mcp_server._tool_result("read_project_file", {"path": "app.py"})
+        content = result["content"]
+        self.assertNotIn("raw credential", content)
+        self.assertNotIn("continued private text", content)
+        self.assertEqual(result["total_lines"], len(source.splitlines()))
+        self.assertIn('api_key = r"[REDACTED]"', content)
+        self.assertIn('description = "ordinary text"', content)
+
     def test_carriage_return_inside_secret_keeps_following_source_line_number(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

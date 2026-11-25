@@ -147,6 +147,21 @@ test('payload para a IA informa recorte limitado e proíbe alegar completude', a
   assert.match(request.instructions, /nunca afirme que o histórico completo foi analisado se archive_complete for falso/);
 });
 
+test('OpenAI Chat omite temperature para gpt-6-astra e preserva o padrão para outros modelos', async () => {
+  const requests = [];
+  const fetch = async (_url, options) => {
+    requests.push(JSON.parse(options.body));
+    return {ok:true, status:200, text:async () => JSON.stringify({choices:[{message:{content:'OK'}}]})};
+  };
+  const {context, window} = setup(fetch);
+  vm.runInContext(fs.readFileSync(path.join(staticDir, 'ai-assistant.js'), 'utf8'), context);
+  for (const model of ['gpt-6-astra', 'compatible-custom-model']) {
+    await window.LotoMasterAI.testConnection({provider:'openai-chat',endpoint:'https://example.test/chat',model,key:'test-key'});
+  }
+  assert.equal(Object.hasOwn(requests[0], 'temperature'), false);
+  assert.equal(requests[1].temperature, 0.2);
+});
+
 test('recorte limitado sem lacunas prossegue com até 500 concursos', async () => {
   const mock = pages(7000);
   let posted;

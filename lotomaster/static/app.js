@@ -508,7 +508,9 @@ async function handleHistoryBatch(event) {
     if (trevos.length<2||trevos.length>6||new Set(trevos).size!==trevos.length||trevos.some(n=>!Number.isInteger(n)||n<1||n>6)) {invalid('Informe de 2 a 6 trevos distintos entre 1 e 6.');return;}
     bonus.trevos=trevos;
   }
-  const batchPreloaded=state.simulatorTickets.length&&$('#batch-numbers').value===state.simulatorText;
+  const batchRows=parseStrictNumberLines($('#batch-numbers').value);
+  const savedRows=state.simulatorTickets.length?parseStrictNumberLines(state.simulatorText):null;
+  const batchPreloaded=state.simulatorTickets.length&&batchRows!==null&&savedRows!==null&&JSON.stringify(batchRows)===JSON.stringify(savedRows);
   const baseTickets=parsed.map((numbers,index)=>batchPreloaded?{...state.simulatorTickets[index],numbers,ticket_number:index+1}:{numbers,ticket_number:index+1,...(item.key==='supersete'?{columns:numbers.map(n=>[n])}:{})});
   const tickets=ticketsWithBonus(baseTickets,bonus,batchOverride);
   if (item.key==='maismilionaria'&&tickets.some(ticket=>{const trevos=ticket.bonus?.trevos;return !Array.isArray(trevos)||trevos.length<2||trevos.length>6||new Set(trevos).size!==trevos.length||trevos.some(n=>!Number.isInteger(n)||n<1||n>6);})) {invalid('A +Milionária exige de 2 a 6 trevos distintos por jogo. Informe os trevos e marque a substituição do lote quando os jogos não tiverem bônus preservados.');return;}
@@ -836,7 +838,7 @@ async function generateAssistantTicket() {
     }
     const data=await api(`/${item.key}/generate`,{method:'POST',body:JSON.stringify(payload)});
     const ticket=data.items[0];
-    target.innerHTML=`<div class="generated-ticket"><div class="generated-ticket-head"><b>Jogo aleatório</b><span class="pill">Sem ponderação histórica</span></div>${item.key==='supersete'?`<div class="col-grid">${ticket.columns.map((values,index)=>`<div class="col-box"><strong>COLUNA ${index+1}</strong>${balls(values)}</div>`).join('')}</div>`:`<div class="ball-row">${balls(ticket.numbers,false,item.digits)}</div>`}${ticket.bonus?.team?`<div class="ticket-stats">Time do Coração: ${esc(ticket.bonus.team)}</div>`:''}<div class="ticket-stats">${esc(probabilityEvent(item,ticket.probability))}: 1 em ${esc(Number(ticket.probability.one_in).toLocaleString('pt-BR'))}</div><div class="small-note">${esc(data.disclaimer)}</div></div>`;
+    target.innerHTML=`<div class="generated-ticket"><div class="generated-ticket-head"><b>Jogo aleatório</b><span class="pill">Sem ponderação histórica</span></div>${item.key==='supersete'?`<div class="col-grid">${ticket.columns.map((values,index)=>`<div class="col-box"><strong>COLUNA ${index+1}</strong>${balls(values)}</div>`).join('')}</div>`:`<div class="ball-row">${balls(ticket.numbers,false,item.digits)}</div>`}${ticket.bonus?.month?`<div class="ticket-stats">Mês da Sorte: ${esc(months[Number(ticket.bonus.month)-1]||ticket.bonus.month)}</div>`:''}${ticket.bonus?.team?`<div class="ticket-stats">Time do Coração: ${esc(ticket.bonus.team)}</div>`:''}${ticket.bonus?.trevos?`<div class="ticket-stats">Trevos: ${balls(ticket.bonus.trevos,true)}</div>`:''}<div class="ticket-stats">${esc(probabilityEvent(item,ticket.probability))}: 1 em ${esc(Number(ticket.probability.one_in).toLocaleString('pt-BR'))}</div><div class="small-note">${esc(data.disclaimer)}</div></div>`;
   } catch(error) { target.innerHTML=errorBlock(error.message); }
 }
 function invalidateHistoryNumberSearch(message='Resultado anterior desatualizado; pesquise novamente.') {
