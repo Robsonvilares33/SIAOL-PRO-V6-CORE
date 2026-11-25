@@ -331,8 +331,11 @@ def _redact_private_key_blocks(text: str) -> str:
     cursor = 0
     for start, block_end in _private_key_block_spans(text):
         output.append(text[cursor:start])
-        trailing_separator = block_end < len(text) and text[block_end] == "\n"
-        output.append(replacement + "\n" * (text[start:block_end].count("\n") + (0 if trailing_separator else 1)))
+        line_terminators = re.findall(r"\r\n|\r|\n", text[start:block_end])
+        redacted_block = replacement + "".join(line_terminators)
+        if not text[block_end:] and line_terminators:
+            redacted_block += replacement
+        output.append(redacted_block)
         cursor = block_end
     output.append(text[cursor:])
     return "".join(output)

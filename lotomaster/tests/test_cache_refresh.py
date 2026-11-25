@@ -44,6 +44,26 @@ class LatestResultCacheTests(unittest.TestCase):
         self.assertEqual(result["source"], "CAIXA via Cloudflare Worker")
         self.assertEqual(engine._latest_cache["megasena"][1]["contest"], 101)
 
+    def test_list_results_includes_latest_draw_when_sqlite_save_fails(self):
+        latest = {"contest": 101, "numbers": [4, 5, 6]}
+        older = {"contest": 100, "numbers": [1, 2, 3]}
+
+        def fetch_draw(_game, contest=None):
+            return {**latest, "contest": contest or latest["contest"]}
+
+        for limit, rows, expected in ((1, [older], [101]), (2, [older], [101, 100])):
+            with self.subTest(limit=limit):
+                engine._latest_cache.clear()
+                with (
+                    patch("lotomaster.engine.fetch_draw", side_effect=fetch_draw),
+                    patch("lotomaster.engine.storage.save_draw", side_effect=OSError("disk")),
+                    patch("lotomaster.engine.storage.list_draws_range", return_value=rows),
+                ):
+                    result = engine.list_results("megasena", limit=limit)
+
+                self.assertEqual([draw["contest"] for draw in result], expected)
+                self.assertEqual(result[0]["source"], "CAIXA via Cloudflare Worker")
+
     def test_sequential_older_refresh_does_not_downgrade_cache(self):
         newer = {"contest": 101, "numbers": [4, 5, 6]}
         older = {"contest": 100, "numbers": [1, 2, 3]}
@@ -87,6 +107,47 @@ class LatestResultCacheTests(unittest.TestCase):
             "A CAIXA está temporariamente indisponível; o resultado em cache pode estar desatualizado.",
         )
         self.assertNotIn("rede indisponível", result["warning"])
+
+    def test_failed_refresh_preserves_newer_checked_memory_than_sqlite(self):
+        fresh = {
+            "contest": 101,
+            "numbers": [4, 5, 6],
+            "_latest_checked_at": "2026-11-24T20:00:00+00:00",
+        }
+        stale = {"contest": 100, "numbers": [1, 2, 3]}
+        cache_entry = (time.monotonic(), fresh)
+        engine._latest_cache["megasena"] = cache_entry
+
+        with (
+            patch("lotomaster.engine.fetch_draw", side_effect=OSError("rede indisponível")),
+            patch("lotomaster.engine.storage.latest_draw", return_value=stale),
+        ):
+            result = engine.latest_result("megasena", refresh=True)
+
+        self.assertEqual(result["contest"], 101)
+        self.assertEqual(result["source"], "cache")
+        self.assertIn("warning", result)
+        self.assertIs(engine._latest_cache["megasena"], cache_entry)
+
+    def test_failed_refresh_preserves_checked_memory_when_sqlite_is_empty(self):
+        fresh = {
+            "contest": 101,
+            "numbers": [4, 5, 6],
+            "_latest_checked_at": "2026-11-24T20:00:00+00:00",
+        }
+        cache_entry = (time.monotonic(), fresh)
+        engine._latest_cache["megasena"] = cache_entry
+
+        with (
+            patch("lotomaster.engine.fetch_draw", side_effect=OSError("rede indisponível")),
+            patch("lotomaster.engine.storage.latest_draw", return_value=None),
+        ):
+            result = engine.latest_result("megasena", refresh=True)
+
+        self.assertEqual(result["contest"], 101)
+        self.assertEqual(result["source"], "cache")
+        self.assertIn("warning", result)
+        self.assertIs(engine._latest_cache["megasena"], cache_entry)
 
     def test_failed_refresh_cannot_overwrite_a_concurrent_success(self):
         cached_db = {"contest": 100, "numbers": [1, 2, 3]}

@@ -48,13 +48,17 @@ def latest_result(game: str, refresh: bool = True) -> dict:
         return {**draw, "source": "CAIXA via Cloudflare Worker"}
     except Exception:
         cached_db = storage.latest_draw(key)
+        fallback_warning = (
+            "A CAIXA está temporariamente indisponível; "
+            "o resultado em cache pode estar desatualizado."
+        )
         stale = None
         if cached_db:
             cached_db = {k: v for k, v in cached_db.items() if k not in {"_latest_checked_at", "_known_latest_contest"}}
             stale = {
                 **cached_db,
                 "source": "cache",
-                "warning": "A CAIXA está temporariamente indisponível; o resultado em cache pode estar desatualizado.",
+                "warning": fallback_warning,
             }
         with _latest_lock:
             concurrent_mem = _latest_cache.get(key)
@@ -63,6 +67,16 @@ def latest_result(game: str, refresh: bool = True) -> dict:
                 if current_draw.get("_latest_checked_at"):
                     return {**current_draw, "source": "CAIXA via Cloudflare Worker"}
                 return {**current_draw, "source": "cache"}
+            if (
+                concurrent_mem is not None
+                and concurrent_mem[1].get("_latest_checked_at")
+                and (stale is None or int(concurrent_mem[1]["contest"]) > int(stale["contest"]))
+            ):
+                return {
+                    **concurrent_mem[1],
+                    "source": "cache",
+                    "warning": fallback_warning,
+                }
             if stale is not None:
                 _latest_cache[key] = (now, stale)
                 return stale
@@ -101,9 +115,17 @@ def list_results(game: str, limit: int = 20, refresh_latest: bool = True) -> lis
     if latest:
         newest = int(latest.get("_known_latest_contest", latest["contest"]))
         results = [row for row in results if newest - limit < int(row["contest"]) <= newest]
-    # Preserve the freshness warning/source attached to the latest lookup;
-    # the persisted payload intentionally does not carry transient warnings.
-    results = [latest if int(row["contest"]) == int(latest["contest"]) else row for row in results] if latest else results
+        # Keep a validated latest draw visible even if SQLite could not save it.
+        # Preserve transient provenance by preferring this object on duplicates.
+        latest_contest = int(latest["contest"])
+        if newest - limit < latest_contest <= newest:
+            results_by_contest = {int(row["contest"]): row for row in results}
+            results_by_contest[latest_contest] = latest
+            results = sorted(
+                results_by_contest.values(),
+                key=lambda row: int(row["contest"]),
+                reverse=True,
+            )[:limit]
     if latest and not results:
         raise RuntimeError("Nenhum concurso válido disponível no recorte solicitado; há lacunas no cache.")
     return results

@@ -342,23 +342,61 @@ class MCPReadOnlyTests(unittest.TestCase):
         self.assertEqual(len(redacted.splitlines()), len(complete.splitlines()))
         self.assertIn("[REDACTED PRIVATE KEY BLOCK]", redacted)
         self.assertNotIn("secret material", redacted)
+        self.assertEqual(redacted.endswith(("\r", "\n")), complete.endswith(("\r", "\n")))
+
+        complete_crlf = "\r\n".join(("-----BEGIN RSA PRIVATE KEY-----", "secret material", "-----END RSA PRIVATE KEY-----"))
+        redacted_crlf = mcp_server._redact_sensitive_text(complete_crlf)
+        self.assertEqual(len(redacted_crlf.splitlines()), len(complete_crlf.splitlines()))
+        self.assertEqual(redacted_crlf.endswith(("\r", "\n")), complete_crlf.endswith(("\r", "\n")))
+        self.assertEqual(redacted_crlf.count("\r\n"), complete_crlf.count("\r\n"))
+        self.assertNotIn("secret material", redacted_crlf)
 
         incomplete = "-----BEGIN PRIVATE KEY-----\n" * 5000
         self.assertEqual(mcp_server._redact_sensitive_text(incomplete), incomplete)
 
     def test_private_key_redaction_preserves_pagination_line_numbers(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            marker = "fixture-payload-a17c"
-            source = "before\n-----BEGIN PRIVATE KEY-----\n" + marker + "\n-----END PRIVATE KEY-----\nafter\nlast\n"
-            (root / "keys.py").write_text(source, encoding="utf-8")
-            with patch.object(mcp_server, "REPO_ROOT", root):
-                first = mcp_server._tool_result("read_project_file", {"path": "keys.py", "start_line": 1, "max_lines": 3})
-                second = mcp_server._tool_result("read_project_file", {"path": "keys.py", "start_line": 4, "max_lines": 3})
-        self.assertEqual((first["total_lines"], first["start_line"], first["end_line"]), (6, 1, 3))
-        self.assertEqual((second["total_lines"], second["start_line"], second["end_line"]), (6, 4, 6))
-        self.assertNotIn(marker, first["content"] + second["content"])
-        self.assertIn("4: ", second["content"])
+        marker = "fixture-payload-a17c"
+        cases = (
+            ("LF", "\n", True, ""),
+            ("CRLF", "\r\n", True, ""),
+            ("CRLF without final newline", "\r\n", False, ""),
+            ("CRLF same-line suffix", "\r\n", True, "_suffix"),
+        )
+        for label, line_ending, final_newline, suffix in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source = line_ending.join(
+                    (
+                        "before",
+                        "-----BEGIN PRIVATE KEY-----",
+                        marker,
+                        "-----END PRIVATE KEY-----" + suffix,
+                        "after",
+                        "last",
+                    )
+                )
+                if final_newline:
+                    source += line_ending
+                redacted = mcp_server._redact_private_key_blocks(source)
+                self.assertEqual(len(redacted.splitlines()), len(source.splitlines()))
+                self.assertEqual(redacted.endswith(("\r", "\n")), source.endswith(("\r", "\n")))
+                self.assertEqual(redacted.count(line_ending), source.count(line_ending))
+                if line_ending == "\r\n":
+                    self.assertNotIn("\n", redacted.replace("\r\n", ""))
+                    self.assertNotIn("\r", redacted.replace("\r\n", ""))
+                self.assertNotIn(marker, redacted)
+
+                (root / "keys.py").write_bytes(source.encode("utf-8"))
+                with patch.object(mcp_server, "REPO_ROOT", root):
+                    first = mcp_server._tool_result("read_project_file", {"path": "keys.py", "start_line": 1, "max_lines": 3})
+                    second = mcp_server._tool_result("read_project_file", {"path": "keys.py", "start_line": 4, "max_lines": 3})
+                self.assertEqual((first["total_lines"], first["start_line"], first["end_line"]), (6, 1, 3))
+                self.assertEqual((second["total_lines"], second["start_line"], second["end_line"]), (6, 4, 6))
+                self.assertNotIn(marker, first["content"] + second["content"])
+                self.assertIn("4: ", second["content"])
+                self.assertIn("5: after", second["content"])
+                if suffix:
+                    self.assertIn(f"4: {suffix}", second["content"])
 
     def test_analyze_games_is_bounded_and_non_persistent(self):
         with tempfile.TemporaryDirectory() as directory:
